@@ -8,8 +8,9 @@ https://github.com/user-attachments/assets/2be9d9cc-dfaf-4284-88d5-a9f24a1ce587
 
 [![Tests](https://github.com/imtiyazMohammed/desk-sorting-arm/actions/workflows/tests.yml/badge.svg)](https://github.com/imtiyazMohammed/desk-sorting-arm/actions/workflows/tests.yml)
 
-Kinematics simulation (Phase A) and computer-vision foundation (Phase B).
-No hardware required to run anything in this repository.
+Kinematics simulation (Phase A), computer-vision foundation (Phase B), and
+parametric CAD (Phase D). No hardware required to run anything in this
+repository.
 
 **Requires Python 3.10-3.14.** `build123d` (Phase D parametric CAD) declares
 `requires-python ">=3.10,<3.15"`, so the Python 3.9 support present through
@@ -22,21 +23,25 @@ Phase A has been dropped. Raspberry Pi OS Bookworm ships 3.11 and Trixie ships
 # 1. Install dependencies
 python3 -m pip install -r requirements.txt
 
-# 2. Run the test suite (103 tests, ~2 seconds)
+# 2. Run the test suite (179 tests, ~6 seconds)
 python3 -m pytest tests/ -v
 
 # 3. Try the module smoke tests
-python3 -m src.geometry              # geometry summary
+python3 -m src.geometry              # geometry + hardware summary
 python3 -m src.forward_kinematics    # FK sanity checks
 python3 -m src.inverse_kinematics    # IK sample solves
 python3 -m src.trajectory            # trajectory profiling
 python3 -m src.image_source          # synthetic camera frames
 
-# 4. Manual hardware check (needs a webcam; not part of the test suite)
+# 4. Generate the CAD parts
+python3 -m cad.base_pedestal         # writes cad/output/base_pedestal.stl
+python3 -m cad.base_pedestal --report   # dimensions only, no export
+
+# 5. Manual hardware check (needs a webcam; not part of the test suite)
 python3 scripts/preview_camera.py
 python3 scripts/preview_camera.py --synthetic   # works without a camera
 
-# 5. Read the proof-of-concept document
+# 6. Read the proof-of-concept document
 docs/PROOF_OF_CONCEPT.md
 ```
 
@@ -52,18 +57,23 @@ python3 -m pip install -r requirements-vision.txt
 ```
 desk_arm/
 ├── src/
-│   ├── geometry.py             # ArmGeometry (single source of truth)
+│   ├── geometry.py             # ArmGeometry + hardware specs (source of truth)
 │   ├── forward_kinematics.py   # Hand-derived FK using homogeneous transforms
 │   ├── arm_chain.py            # ikpy Chain constructor
 │   ├── inverse_kinematics.py   # IK with reachability + singularity checks
 │   ├── trajectory.py           # Trapezoidal velocity profiler
 │   ├── visualizer.py           # 3D matplotlib rendering
 │   └── image_source.py         # ImageSource ABC + synthetic and webcam sources
+├── cad/
+│   ├── base_pedestal.py        # Parametric base pedestal (build123d)
+│   ├── output/                 # Generated STLs
+│   └── README.md               # Parametric approach + regeneration
 ├── scripts/
 │   └── preview_camera.py       # Manual webcam check, not run by CI
 ├── tests/
 │   ├── test_kinematics.py      # 32 tests - Phase A kinematics
-│   └── test_image_source.py    # 71 tests - Session B.1 image acquisition
+│   ├── test_image_source.py    # 71 tests - Session B.1 image acquisition
+│   └── test_cad.py             # 76 tests - Session D.1 parametric CAD
 ├── docs/
 │   ├── PROOF_OF_CONCEPT.md     # Design + math + validation
 │   └── figures/                # Generated diagrams
@@ -83,10 +93,13 @@ desk_arm/
 | L3 (wrist → TCP) | 200 mm | |
 | Base height | 100 mm | |
 | Total reach | 950 mm | Covers 848.5 mm desk diagonal with 12% margin |
-| Servos | DS3218 (5×) | 20 kg·cm digital metal-gear |
+| Servos | DS3218 (5×) | 21.5 kg·cm at 6.8 V, digital metal-gear |
+| Base pedestal | 70 mm tall, 93.3 mm flange | `base_height_mm` 100 − 30 mm stack allowance |
 
 ## Known outstanding items (deferred to later phases)
 
 - **Shoulder torque budget**: 950 mm arm exceeds DS3218 20 kg·cm rating. To be resolved in Phase C via 2:1 gear reduction or dual-servo shoulder.
 - **Singularity threshold**: Currently unit-inconsistent (mm-scaled Jacobian). To be normalized before deployment.
 - **Orientation IK**: Position-only solves for now. Full pose IK (with grasp orientation) belongs to the grasp planner in Phase E.
+- **Unverified servo dimensions**: The DS3218 body envelope is datasheet-confirmed, but its mounting-flange geometry and output-shaft placement are placeholders. See `ServoSpec.UNVERIFIED_FIELDS` and [cad/README.md](cad/README.md); measure a real unit before printing for final assembly.
+- **Provisional base stack**: The 6 mm turntable plate and 24 mm shoulder bracket rise that set the pedestal height are estimates, replaced in Sessions D.2/D.3.
