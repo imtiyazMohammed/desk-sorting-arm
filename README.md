@@ -23,7 +23,7 @@ Phase A has been dropped. Raspberry Pi OS Bookworm ships 3.11 and Trixie ships
 # 1. Install dependencies
 python3 -m pip install -r requirements.txt
 
-# 2. Run the test suite (275 tests, ~7 seconds)
+# 2. Run the test suite (375 tests, ~7 seconds)
 python3 -m pytest tests/ -v
 
 # 3. Try the module smoke tests
@@ -32,6 +32,7 @@ python3 -m src.forward_kinematics    # FK sanity checks
 python3 -m src.inverse_kinematics    # IK sample solves
 python3 -m src.trajectory            # trajectory profiling
 python3 -m src.image_source          # synthetic camera frames
+python3 -m src.camera_calibration    # synthetic calibration vs ground truth
 
 # 4. Generate the CAD parts
 python3 -m cad.base_pedestal         # pedestal + desk-clamp upper jaw
@@ -39,9 +40,10 @@ python3 -m cad.desk_clamp_lower_jaw  # clamp lower jaw (captive M8 nut)
 python3 -m cad.desk_clamp_knob       # hand knob
 #   ... each takes --report (dimensions only) and --output PATH
 
-# 5. Manual hardware check (needs a webcam; not part of the test suite)
+# 5. Manual hardware tools (need a webcam; not part of the test suite)
 python3 scripts/preview_camera.py
-python3 scripts/preview_camera.py --synthetic   # works without a camera
+python3 scripts/calibrate_camera.py
+#   ... both take --synthetic to run without a camera
 
 # 6. Read the proof-of-concept document
 docs/PROOF_OF_CONCEPT.md
@@ -65,7 +67,8 @@ desk_arm/
 │   ├── inverse_kinematics.py   # IK with reachability + singularity checks
 │   ├── trajectory.py           # Trapezoidal velocity profiler
 │   ├── visualizer.py           # 3D matplotlib rendering
-│   └── image_source.py         # ImageSource ABC + synthetic and webcam sources
+│   ├── image_source.py         # ImageSource ABC + synthetic and webcam sources
+│   └── camera_calibration.py   # Chessboard intrinsics + synthetic target
 ├── cad/
 │   ├── base_pedestal.py        # Pedestal + desk-clamp upper jaw (build123d)
 │   ├── desk_clamp_lower_jaw.py # Clamp lower jaw, captive M8 nut
@@ -75,10 +78,12 @@ desk_arm/
 │   ├── output/                 # Generated STLs
 │   └── README.md               # Parametric approach, clamp design, assembly
 ├── scripts/
-│   └── preview_camera.py       # Manual webcam check, not run by CI
+│   ├── preview_camera.py       # Manual webcam check, not run by CI
+│   └── calibrate_camera.py     # Interactive intrinsic calibration
 ├── tests/
 │   ├── test_kinematics.py      # 32 tests - Phase A kinematics
 │   ├── test_image_source.py    # 71 tests - Session B.1 image acquisition
+│   ├── test_camera_calibration.py  # 100 tests - Session B.2 calibration
 │   └── test_cad.py             # 172 tests - Sessions D.1/D.1b parametric CAD
 ├── docs/
 │   ├── PROOF_OF_CONCEPT.md     # Design + math + validation
