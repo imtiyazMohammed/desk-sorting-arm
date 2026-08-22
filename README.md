@@ -23,7 +23,7 @@ Phase A has been dropped. Raspberry Pi OS Bookworm ships 3.11 and Trixie ships
 # 1. Install dependencies
 python3 -m pip install -r requirements.txt
 
-# 2. Run the test suite (375 tests, ~7 seconds)
+# 2. Run the test suite (402 tests, ~8 seconds)
 python3 -m pytest tests/ -v
 
 # 3. Try the module smoke tests
@@ -35,9 +35,9 @@ python3 -m src.image_source          # synthetic camera frames
 python3 -m src.camera_calibration    # synthetic calibration vs ground truth
 
 # 4. Generate the CAD parts
-python3 -m cad.base_pedestal         # pedestal + desk-clamp upper jaw
-python3 -m cad.desk_clamp_lower_jaw  # clamp lower jaw (captive M8 nut)
-python3 -m cad.desk_clamp_knob       # hand knob
+python3 -m cad.base_pedestal            # monolithic U-clamp + servo turret
+python3 -m cad.desk_clamp_knob          # hand knob
+python3 -m cad.desk_clamp_pressure_foot # foot on the clamp screw's tip
 #   ... each takes --report (dimensions only) and --output PATH
 
 # 5. Manual hardware tools (need a webcam; not part of the test suite)
@@ -70,9 +70,9 @@ desk_arm/
 │   ├── image_source.py         # ImageSource ABC + synthetic and webcam sources
 │   └── camera_calibration.py   # Chessboard intrinsics + synthetic target
 ├── cad/
-│   ├── base_pedestal.py        # Pedestal + desk-clamp upper jaw (build123d)
-│   ├── desk_clamp_lower_jaw.py # Clamp lower jaw, captive M8 nut
+│   ├── base_pedestal.py        # Monolithic U-clamp + servo turret (build123d)
 │   ├── desk_clamp_knob.py      # Fluted hand knob
+│   ├── desk_clamp_pressure_foot.py  # Foot on the clamp screw's tip
 │   ├── _design.py              # Shared DesignStatus / DesignRuleError
 │   ├── _primitives.py          # Shared solids (hex_prism)
 │   ├── output/                 # Generated STLs
@@ -84,7 +84,7 @@ desk_arm/
 │   ├── test_kinematics.py      # 32 tests - Phase A kinematics
 │   ├── test_image_source.py    # 71 tests - Session B.1 image acquisition
 │   ├── test_camera_calibration.py  # 100 tests - Session B.2 calibration
-│   └── test_cad.py             # 172 tests - Sessions D.1/D.1b parametric CAD
+│   └── test_cad.py             # 196 tests - Sessions D.1/D.1b/D.1c parametric CAD
 ├── docs/
 │   ├── PROOF_OF_CONCEPT.md     # Design + math + validation
 │   └── figures/                # Generated diagrams
@@ -106,7 +106,7 @@ desk_arm/
 | Total reach | 950 mm | Covers 848.5 mm desk diagonal with 12% margin |
 | Servos | DS3218 (5×) | 21.5 kg·cm at 6.8 V, digital metal-gear |
 | Base pedestal | 70 mm tall, 85.3 mm body | `base_height_mm` 100 − 30 mm stack allowance |
-| Desk mount | M8 edge clamp, 45 mm throat | No drilling; fits 15–35 mm desks, repositionable |
+| Desk mount | Monolithic M8 U-clamp, 45 mm throat | No drilling; fits 15–35 mm desks, repositionable |
 
 ## Known outstanding items (deferred to later phases)
 

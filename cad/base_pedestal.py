@@ -1,5 +1,6 @@
 """
-Base pedestal -- clamps to the desk edge and carries the base yaw joint.
+Base pedestal -- a monolithic U-clamp that wraps the desk edge and carries the
+base yaw joint.
 
 Run directly to write ``cad/output/base_pedestal.stl``::
 
@@ -7,57 +8,67 @@ Run directly to write ``cad/output/base_pedestal.stl``::
     python3 -m cad.base_pedestal --output /tmp/pedestal.stl
     python3 -m cad.base_pedestal --report      # dimensions only, no export
 
-What the part does
-------------------
-The pedestal proper, bottom to top along +Z:
+Shape
+-----
+One solid body in the shape of a C, seen from the side, with a servo turret
+rising from the top arm::
 
-1. **Servo cavity** -- a stepped rectangular pocket, open at the bottom. The
-   servo is inserted from below and pushed up until its mounting ears meet
-   the internal shelf where the pocket narrows from the ear span to the body
-   width. Four M3 pilot holes in that shelf take screws driven upward through
-   the ears. The cavity is offset laterally by
-   ``ServoSpec.body_offset_from_shaft_axis_mm`` so the servo's *output shaft*,
-   not its body centre, lands on the yaw axis.
-2. **Shaft bore** -- clears the servo's output boss through the ceiling above
-   the cavity.
-3. **Bearing seat** -- a press-fit pocket in the top face for a 608ZZ. The
-   seat is cut ``bearing_proud_mm`` shallower than the bearing is wide, so the
-   bearing stands slightly proud and the yaw turntable above rides on the
-   bearing's inner race alone rather than scrubbing on the printed top face.
-   This is what takes axial load off the servo's output shaft.
+                    +----------+  z = +70   bearing seat in the top face
+                    |  servo   |
+                    |  turret  |
+        +-----------+----------+---------+  z = +15   top arm top
+        |///|  pads      cavity opening  |  z =   0   desk surface
+        |///+------------------+---------+
+        |///|                            |
+        |sp |        throat (desk)        |
+        |ine|                            |
+        |///+------------------+---------+  z = -45   bottom arm top
+        |///|      nut pocket  | O bolt  |
+        +---+------------------+---------+  z = -60   bottom arm underside
+         x=-45   x=-30                x=+30
+                  ^ desk edge
 
-Plus the **upper jaw** of the desk clamp (Session D.1b), a plate extending in
-+X from the pedestal at desk level:
+Local frame: the origin sits **on the yaw axis at the desk's top surface**, so
+``z = 0`` is the desk plane and ``+X`` points inward over the desk. The desk
+edge is therefore at ``x = -servo_shaft_offset_from_edge_mm``. This choice is
+what lets ``ArmGeometry.base_height_mm`` (desk surface to shoulder pivot) and
+the clamp geometry share one datum without a conversion step.
 
-4. **Pad recess** on the jaw's underside, for a glued-in anti-slip rubber pad.
-5. **M8 through-hole** near the outboard end, for the clamping screw. The
-   desk edge is meant to fall between the pad's outer edge and that hole --
-   see :attr:`PedestalParameters.desk_edge_window_mm`.
+Why a turret rather than a thick arm
+------------------------------------
+The DS3218 is 40.5 mm tall, and with print clearance, the shaft boss, a
+ceiling and the bearing seat it needs 55.5 mm of housing. A 15 mm top arm
+cannot contain it. Thickening the arm to 55 mm would make the part a slab
+rather than a C-profile and triple its material, so the arm stays thin and the
+servo lives in a turret above it, reaching the 70 mm pedestal height exactly.
 
-A radial cable slot on the -X side (opposite the clamp) lets the servo lead
-out of the otherwise-enclosed cavity.
+Why the screw points up
+-----------------------
+The nut is captive in a pocket in the bottom arm's **underside**; the screw
+threads up through it, and its tip carries a printed pressure foot that bears
+on the desk's underside. The knob hangs below on the screw's head. A screw
+entering from the top of the bottom arm would press against nothing and could
+not clamp at all.
 
-Why a clamp instead of bolts
-----------------------------
-The Session D.1 design bolted a flange to the desk through four M4 holes.
-That required drilling the desk, which the user does not want, and fixed the
-arm in one place. A desk-edge clamp needs no holes and can be repositioned or
-removed. The pedestal internals -- cavity, shelf, bore, bearing seat -- are
-unchanged; only the mounting changed.
+Why gussets rather than fillets
+-------------------------------
+The two inner corners of the U carry the whole load path and want stress
+relief, but a swept fillet is the most fragile operation to re-run when an
+upstream dimension moves -- and every dimension here derives from
+``src/geometry.py`` precisely so that it *can* move. Triangular gussets give
+most of the benefit and always regenerate.
 
 Sizing philosophy
 -----------------
-Nothing below is a magic number. The body radius is *derived*: it is whatever
-is needed to keep ``min_wall_thickness_mm`` of material outside the furthest
-internal feature. The jaw's reach is derived from where the servo cavity ends,
-the pad size, and the clamp screw's clearance. Feed a different servo into
-``src/geometry.py`` and the pedestal resizes itself.
-:meth:`PedestalParameters.validate` then re-checks every clearance and refuses
-to build a part that would print with a wall thinner than specified, a hole
-breaking into a pocket, or a clamp screw too short to reach its nut.
+Nothing below is a magic number. The clamp's width is derived from what the
+servo cavity and bearing seat need; the screw is placed as far outboard as the
+pressure foot allows, because that simultaneously shortens the bottom arm's
+cantilever and lengthens the lever it resists tipping with.
+:meth:`PedestalParameters.validate` re-checks every clearance and refuses to
+build a part that would print with a wall thinner than specified, a pocket
+breaking into another, or a screw too short to reach the desk.
 
-Units are millimetres throughout, matching ``src.geometry`` and STL's
-convention.
+Units are millimetres throughout, matching ``src.geometry`` and STL.
 
 .. warning::
    Several ``ServoSpec`` fields this part depends on -- notably the mounting
@@ -75,10 +86,10 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Optional, Tuple
 
-from build123d import Align, Box, Cylinder, Part, Pos, export_stl
+from build123d import Align, Box, Cylinder, Part, Pos, Rot, export_stl
 
 from cad._design import DesignRuleError, DesignStatus
-
+from cad._primitives import hex_prism, right_triangle_prism
 from src.geometry import (
     DEFAULT_ARM,
     DEFAULT_HARDWARE,
@@ -98,6 +109,9 @@ __all__ = [
 #: Where ``python3 -m cad.base_pedestal`` writes by default.
 DEFAULT_STL_PATH = Path(__file__).resolve().parent / "output" / "base_pedestal.stl"
 
+#: (x_min, x_max, y_min, y_max) of one anti-slip pad recess, in mm.
+PadRect = Tuple[float, float, float, float]
+
 
 class PedestalDesignError(DesignRuleError):
     """
@@ -112,22 +126,37 @@ class PedestalDesignError(DesignRuleError):
 @dataclass(frozen=True)
 class PedestalParameters:
     """
-    Fully resolved pedestal dimensions, in millimetres.
+    Fully resolved U-clamp dimensions, in millimetres.
 
     Build these with :meth:`from_geometry` rather than by hand; the direct
     constructor exists so tests can inject deliberately-broken values and
     confirm :meth:`validate` catches them.
     """
 
-    # ---- Overall envelope -------------------------------------------------
-    total_height_mm: float
-    body_radius_mm: float
+    # ---- U-profile envelope -----------------------------------------------
+    clamp_width_mm: float
+    desk_seat_x_mm: float
+    spine_inner_x_mm: float
+    spine_outer_x_mm: float
+    top_arm_inner_x_mm: float
+    top_arm_thickness_mm: float
+    bottom_arm_inner_x_mm: float
+    bottom_arm_thickness_mm: float
+    throat_opening_mm: float
+    gusset_size_mm: float
 
-    # ---- Servo cavity -----------------------------------------------------
-    cavity_body_length_mm: float
-    cavity_ear_length_mm: float
-    cavity_width_mm: float
-    cavity_offset_x_mm: float
+    # ---- Servo turret -----------------------------------------------------
+    turret_top_z_mm: float
+    turret_x_min_mm: float
+    turret_x_max_mm: float
+    turret_y_min_mm: float
+    turret_y_max_mm: float
+
+    # ---- Servo cavity (long axis across the clamp, along Y) ---------------
+    cavity_x_span_mm: float
+    cavity_body_span_y_mm: float
+    cavity_ear_span_y_mm: float
+    cavity_offset_y_mm: float
     cavity_top_z_mm: float
     ear_shelf_z_mm: float
 
@@ -136,24 +165,22 @@ class PedestalParameters:
     bearing_seat_diameter_mm: float
     bearing_seat_depth_mm: float
 
-    # ---- Desk clamp: upper jaw --------------------------------------------
-    jaw_thickness_mm: float
-    jaw_width_mm: float
-    jaw_reach_mm: float
-    pad_inner_x_mm: float
-    pad_length_mm: float
-    pad_width_mm: float
+    # ---- Anti-slip pads on the top arm's underside ------------------------
     pad_recess_depth_mm: float
+    pad_edge_margin_mm: float
+
+    # ---- Clamping screw ---------------------------------------------------
     bolt_axis_x_mm: float
     bolt_hole_diameter_mm: float
-    desk_edge_window_mm: float
-    knob_diameter_mm: float
+    nut_pocket_across_flats_mm: float
+    nut_pocket_depth_mm: float
+    pressure_foot_diameter_mm: float
 
     # ---- Servo retention --------------------------------------------------
     servo_screw_hole_diameter_mm: float
     servo_screw_hole_depth_mm: float
-    servo_screw_spacing_x_mm: float
     servo_screw_spacing_y_mm: float
+    servo_screw_spacing_x_mm: float
 
     # ---- Cable exit -------------------------------------------------------
     cable_slot_width_mm: float
@@ -174,7 +201,6 @@ class PedestalParameters:
         *,
         bearing_proud_mm: float = 0.5,
         ear_top_offset_from_body_top_mm: float = 10.0,
-        desk_edge_window_mm: float = 10.0,
         cable_slot_width_mm: float = 8.0,
         cable_slot_height_mm: float = 5.0,
         servo_screw_hole_depth_mm: float = 6.0,
@@ -188,20 +214,15 @@ class PedestalParameters:
             Sources of truth. Default to ``DEFAULT_ARM`` / ``DEFAULT_HARDWARE``;
             injectable so tests can vary the design without touching globals.
         bearing_proud_mm:
-            How far the bearing stands above the top face. Must be positive,
-            or the turntable rubs the printed face instead of turning on the
-            bearing's inner race.
+            How far the bearing stands above the turret's top face. Must be
+            positive, or the yaw turntable rubs the printed face instead of
+            turning on the bearing's inner race.
         ear_top_offset_from_body_top_mm:
             Distance from the top of the servo body down to the top of its
             mounting ears. UNVERIFIED placeholder -- see the module warning.
-        desk_edge_window_mm:
-            Gap between the pad's outer edge and the clamp screw's hole. The
-            desk edge must fall inside this band, so it is the positioning
-            tolerance the user gets when siting the arm. Wider is friendlier
-            to use but lengthens the jaw's overhang, which is what limits how
-            hard the knob may be tightened.
         cable_slot_width_mm, cable_slot_height_mm:
-            Radial slot letting the servo lead out of the cavity, on -X.
+            Radial slot letting the servo lead out through the turret's
+            inboard wall.
         servo_screw_hole_depth_mm:
             Depth of the blind M3 pilot holes in the retention shelf.
 
@@ -222,7 +243,6 @@ class PedestalParameters:
         for name, value in (
             ("bearing_proud_mm", bearing_proud_mm),
             ("ear_top_offset_from_body_top_mm", ear_top_offset_from_body_top_mm),
-            ("desk_edge_window_mm", desk_edge_window_mm),
             ("cable_slot_width_mm", cable_slot_width_mm),
             ("cable_slot_height_mm", cable_slot_height_mm),
             ("servo_screw_hole_depth_mm", servo_screw_hole_depth_mm),
@@ -232,7 +252,6 @@ class PedestalParameters:
                     DesignStatus.INVALID_PARAMETER,
                     f"{name} must be positive, got {value}.",
                 )
-
         if bearing_proud_mm >= bearing.width_mm:
             raise PedestalDesignError(
                 DesignStatus.INVALID_PARAMETER,
@@ -241,93 +260,116 @@ class PedestalParameters:
                 "seat left to press the outer race into.",
             )
 
-        # ---- Vertical layout, resolved from the top face downward ---------
+        # ---- Vertical layout, resolved from the turret's top face down ----
         try:
-            total_height = hardware.pedestal_height_mm(arm)
+            turret_top_z = hardware.pedestal_height_mm(arm)
         except ValueError as exc:
             raise PedestalDesignError(DesignStatus.NEGATIVE_HEIGHT, str(exc)) from exc
 
         seat_depth = bearing.width_mm - bearing_proud_mm
-        seat_bottom_z = total_height - seat_depth
-
+        seat_bottom_z = turret_top_z - seat_depth
         # The servo's output boss must reach up to the underside of the
         # bearing, so the body top sits one boss-height below the seat floor.
         cavity_top_z = seat_bottom_z - servo.shaft_boss_height_mm
         ear_shelf_z = cavity_top_z - ear_top_offset_from_body_top_mm
 
-        # ---- Cavity cross-sections ----------------------------------------
-        cavity_body_length = servo.body_length_mm + 2.0 * clearance
-        cavity_ear_length = servo.flange_span_mm + 2.0 * clearance
-        cavity_width = servo.body_width_mm + 2.0 * clearance
-        # Negated: body_offset_from_shaft_axis_mm is measured from the shaft
-        # toward the body's far end, so the body sits on the opposite side of
-        # the axis for the shaft to be centred.
-        cavity_offset_x = -servo.body_offset_from_shaft_axis_mm
+        # ---- Cavity cross-section -----------------------------------------
+        # The servo's long axis runs ACROSS the clamp (along Y). Along X it
+        # would need 54.5 mm inside a 60 mm arm and would break out past the
+        # spine, since the body sits off-centre from the shaft.
+        cavity_x_span = servo.body_width_mm + 2.0 * clearance
+        cavity_body_span_y = servo.body_length_mm + 2.0 * clearance
+        cavity_ear_span_y = servo.flange_span_mm + 2.0 * clearance
+        cavity_offset_y = -servo.body_offset_from_shaft_axis_mm
 
-        # ---- Radial sizing: derive, do not assume -------------------------
-        # Furthest internal feature from the Z axis, plus one wall.
-        ear_corner_radius = math.hypot(
-            abs(cavity_offset_x) + cavity_ear_length / 2.0, cavity_width / 2.0
+        # ---- U-profile envelope -------------------------------------------
+        # The gusset at the top inner corner hangs into the throat, so the
+        # desk's edge comes to rest against it rather than against the spine.
+        # That gusset line -- not the spine face -- is therefore the real desk
+        # seating plane, and the one the shaft offset is measured from. Placing
+        # the spine a gusset further out keeps the shaft exactly
+        # servo_shaft_offset_from_edge_mm from where the desk actually stops.
+        desk_seat_x = -clamp.servo_shaft_offset_from_edge_mm
+        spine_inner_x = desk_seat_x - clamp.gusset_size_mm
+        spine_outer_x = spine_inner_x - clamp.spine_thickness_mm
+        top_arm_inner_x = desk_seat_x + clamp.top_arm_depth_mm
+        bottom_arm_inner_x = desk_seat_x + clamp.bottom_arm_depth_mm
+
+        # ---- Turret: whatever encloses the cavity AND the bearing seat ----
+        seat_diameter = bearing.seat_diameter_mm
+        turret_x_max = max(cavity_x_span / 2.0, seat_diameter / 2.0) + wall
+        turret_x_min = -turret_x_max
+        turret_y_min = min(
+            cavity_offset_y - cavity_ear_span_y / 2.0, -seat_diameter / 2.0
+        ) - wall
+        turret_y_max = max(
+            cavity_offset_y + cavity_ear_span_y / 2.0, seat_diameter / 2.0
+        ) + wall
+
+        # Symmetric about the yaw axis, wide enough for the turret.
+        clamp_width = 2.0 * max(abs(turret_y_min), abs(turret_y_max))
+
+        # ---- Clamping screw ------------------------------------------------
+        # As far outboard as the pressure foot allows: that shortens the bottom
+        # arm's cantilever AND lengthens the lever resisting tipping.
+        bolt_axis_x = (
+            desk_seat_x
+            + clamp.pad_edge_margin_mm
+            + clamp.pressure_foot_diameter_mm / 2.0
         )
-        body_radius = ear_corner_radius + wall
-
-        # ---- Clamp jaw, laid out along +X ---------------------------------
-        # The pad starts one wall outboard of where the servo cavity ends, so
-        # the recess never breaks into the open pocket beneath the servo.
-        cavity_outer_x = cavity_offset_x + cavity_ear_length / 2.0
-        pad_length, pad_width = clamp.upper_jaw_contact_mm
-        pad_inner_x = cavity_outer_x + wall
-        pad_outer_x = pad_inner_x + pad_length
-
-        bolt_hole_diameter = clamp.bolt_clearance_hole_diameter_mm
-        bolt_axis_x = pad_outer_x + desk_edge_window_mm + bolt_hole_diameter / 2.0
-        jaw_reach = bolt_axis_x + bolt_hole_diameter / 2.0 + wall
-        # Wide enough for both the pad and the knob that sits above the bolt.
-        jaw_width = max(pad_width, clamp.knob_diameter_mm)
 
         params = cls(
-            total_height_mm=total_height,
-            body_radius_mm=body_radius,
-            cavity_body_length_mm=cavity_body_length,
-            cavity_ear_length_mm=cavity_ear_length,
-            cavity_width_mm=cavity_width,
-            cavity_offset_x_mm=cavity_offset_x,
+            clamp_width_mm=clamp_width,
+            desk_seat_x_mm=desk_seat_x,
+            spine_inner_x_mm=spine_inner_x,
+            spine_outer_x_mm=spine_outer_x,
+            top_arm_inner_x_mm=top_arm_inner_x,
+            top_arm_thickness_mm=clamp.top_arm_thickness_mm,
+            bottom_arm_inner_x_mm=bottom_arm_inner_x,
+            bottom_arm_thickness_mm=clamp.bottom_arm_thickness_mm,
+            throat_opening_mm=clamp.throat_max_opening_mm,
+            gusset_size_mm=clamp.gusset_size_mm,
+            turret_top_z_mm=turret_top_z,
+            turret_x_min_mm=turret_x_min,
+            turret_x_max_mm=turret_x_max,
+            turret_y_min_mm=turret_y_min,
+            turret_y_max_mm=turret_y_max,
+            cavity_x_span_mm=cavity_x_span,
+            cavity_body_span_y_mm=cavity_body_span_y,
+            cavity_ear_span_y_mm=cavity_ear_span_y,
+            cavity_offset_y_mm=cavity_offset_y,
             cavity_top_z_mm=cavity_top_z,
             ear_shelf_z_mm=ear_shelf_z,
             shaft_bore_diameter_mm=servo.shaft_boss_diameter_mm + 2.0 * clearance,
-            bearing_seat_diameter_mm=bearing.seat_diameter_mm,
+            bearing_seat_diameter_mm=seat_diameter,
             bearing_seat_depth_mm=seat_depth,
-            jaw_thickness_mm=clamp.upper_jaw_total_thickness_mm,
-            jaw_width_mm=jaw_width,
-            jaw_reach_mm=jaw_reach,
-            pad_inner_x_mm=pad_inner_x,
-            pad_length_mm=pad_length,
-            pad_width_mm=pad_width,
             pad_recess_depth_mm=clamp.pad_recess_depth_mm,
+            pad_edge_margin_mm=clamp.pad_edge_margin_mm,
             bolt_axis_x_mm=bolt_axis_x,
-            bolt_hole_diameter_mm=bolt_hole_diameter,
-            desk_edge_window_mm=desk_edge_window_mm,
-            knob_diameter_mm=clamp.knob_diameter_mm,
+            bolt_hole_diameter_mm=clamp.bolt_clearance_hole_diameter_mm,
+            nut_pocket_across_flats_mm=clamp.nut_across_flats_mm + 2.0 * clearance,
+            nut_pocket_depth_mm=clamp.nut_pocket_depth_mm,
+            pressure_foot_diameter_mm=clamp.pressure_foot_diameter_mm,
             servo_screw_hole_diameter_mm=servo.flange_hole_diameter_mm,
             servo_screw_hole_depth_mm=servo_screw_hole_depth_mm,
-            servo_screw_spacing_x_mm=servo.flange_hole_spacing_long_mm,
-            servo_screw_spacing_y_mm=servo.flange_hole_spacing_short_mm,
+            servo_screw_spacing_y_mm=servo.flange_hole_spacing_long_mm,
+            servo_screw_spacing_x_mm=servo.flange_hole_spacing_short_mm,
             cable_slot_width_mm=cable_slot_width_mm,
             cable_slot_height_mm=cable_slot_height_mm,
             min_wall_thickness_mm=wall,
         )
         params.validate()
 
-        # The clamp screw has to span a stack this part only half determines,
-        # so the check lives here where both halves are known.
+        # The screw spans a stack this part only half determines, so the check
+        # lives here where both halves are known.
         if clamp.bolt_length_mm < clamp.required_bolt_length_mm:
             raise PedestalDesignError(
                 DesignStatus.FASTENER_TOO_SHORT,
                 f"{clamp.bolt_thread} x {clamp.bolt_length_mm:.1f} mm cannot "
                 f"span the clamp stack, which needs "
-                f"{clamp.required_bolt_length_mm:.1f} mm at maximum throat "
-                f"({clamp.throat_max_opening_mm:.1f} mm). Fit a longer screw "
-                "or reduce throat_max_opening_mm.",
+                f"{clamp.required_bolt_length_mm:.1f} mm to reach the thinnest "
+                f"supported desk ({clamp.min_desk_thickness_mm:.0f} mm). Fit a "
+                "longer screw or narrow the throat.",
             )
         return params
 
@@ -336,60 +378,104 @@ class PedestalParameters:
     # =====================================================================
 
     @property
-    def cavity_bottom_z_mm(self) -> float:
-        """The cavity is open to the underside, so it starts at z = 0."""
+    def throat_top_z_mm(self) -> float:
+        """The desk's top surface: the underside of the top arm."""
         return 0.0
 
     @property
-    def pad_outer_x_mm(self) -> float:
-        """Outboard edge of the anti-slip pad recess."""
-        return self.pad_inner_x_mm + self.pad_length_mm
+    def throat_bottom_z_mm(self) -> float:
+        """Top face of the bottom arm."""
+        return -self.throat_opening_mm
 
     @property
-    def jaw_overhang_mm(self) -> float:
-        """
-        Worst-case unsupported jaw length, from the desk edge to the bolt.
+    def bottom_arm_bottom_z_mm(self) -> float:
+        """Underside of the bottom arm -- the lowest point of the part."""
+        return self.throat_bottom_z_mm - self.bottom_arm_thickness_mm
 
-        The desk may sit anywhere in the positioning window, so the longest
-        overhang -- and therefore the highest bending stress -- happens when
-        the edge is at the pad's outer edge. This is what
-        ``DeskClampSpec.max_tightening_torque_nm`` is evaluated against.
+    @property
+    def overall_height_mm(self) -> float:
+        """Full printed Z extent, turret top to bottom arm underside."""
+        return self.turret_top_z_mm - self.bottom_arm_bottom_z_mm
+
+    @property
+    def top_arm_depth_mm(self) -> float:
+        """Reach inward from the desk's seating plane, not from the spine."""
+        return self.top_arm_inner_x_mm - self.desk_seat_x_mm
+
+    @property
+    def bottom_arm_overhang_mm(self) -> float:
         """
-        return self.bolt_axis_x_mm - self.pad_outer_x_mm
+        Cantilever length of the bottom arm, spine to screw.
+
+        The screw's reaction bends the bottom arm about the spine, so this is
+        the lever that sets its bending stress.
+        """
+        return self.bolt_axis_x_mm - self.spine_inner_x_mm
 
     @property
     def tipping_lever_arm_mm(self) -> float:
         """
         Lever between the tipping pivot and the clamp screw.
 
-        The assembly would rotate about the inboard edge of the pad, the last
-        line of contact with the desk, so that is the pivot.
+        The arm reaches inward, so a tipping moment lifts the spine side. The
+        assembly would rotate about the top arm's inboard edge -- its last line
+        of contact with the desk -- and the screw's preload resists at
+        :attr:`bolt_axis_x_mm`.
         """
-        return self.bolt_axis_x_mm - self.pad_inner_x_mm
+        return self.top_arm_inner_x_mm - self.bolt_axis_x_mm
+
+    @property
+    def pad_recesses(self) -> Tuple[PadRect, ...]:
+        """
+        The anti-slip pad recesses in the top arm's underside.
+
+        Two strips flanking the servo cavity's opening, which lands in the
+        middle of that face. Placed clear of the top gusset, which hangs into
+        the throat near the spine.
+        """
+        margin = self.pad_edge_margin_mm
+        cavity_half_x = self.cavity_x_span_mm / 2.0
+        y_min = -self.clamp_width_mm / 2.0 + margin
+        y_max = self.clamp_width_mm / 2.0 - margin
+        return (
+            (
+                self.desk_seat_x_mm + margin,
+                -cavity_half_x - margin,
+                y_min,
+                y_max,
+            ),
+            (
+                cavity_half_x + margin,
+                self.top_arm_inner_x_mm - margin,
+                y_min,
+                y_max,
+            ),
+        )
+
+    @property
+    def pad_area_mm2(self) -> float:
+        """Total anti-slip contact area, in square millimetres."""
+        return sum(
+            (x_max - x_min) * (y_max - y_min)
+            for x_min, x_max, y_min, y_max in self.pad_recesses
+        )
+
+    @property
+    def nut_pocket_across_corners_mm(self) -> float:
+        """Hexagon across-corners for the captive nut's pocket."""
+        return self.nut_pocket_across_flats_mm * 2.0 / math.sqrt(3.0)
 
     @property
     def servo_screw_positions(self) -> Tuple[Tuple[float, float], ...]:
         """(x, y) centres of the four M3 servo-retention pilot holes."""
         return tuple(
             (
-                self.cavity_offset_x_mm + sx * self.servo_screw_spacing_x_mm / 2.0,
-                sy * self.servo_screw_spacing_y_mm / 2.0,
+                sx * self.servo_screw_spacing_x_mm / 2.0,
+                self.cavity_offset_y_mm + sy * self.servo_screw_spacing_y_mm / 2.0,
             )
             for sx in (-1.0, 1.0)
             for sy in (-1.0, 1.0)
         )
-
-    def _rect_distance_to_point(
-        self, half_length: float, half_width: float, px: float, py: float
-    ) -> float:
-        """
-        Distance from ``(px, py)`` to the nearest point of the cavity rectangle.
-
-        Zero when the point lies inside.
-        """
-        dx = max(abs(px - self.cavity_offset_x_mm) - half_length, 0.0)
-        dy = max(abs(py) - half_width, 0.0)
-        return math.hypot(dx, dy)
 
     # =====================================================================
     # Validation
@@ -402,52 +488,67 @@ class PedestalParameters:
         Returns :attr:`DesignStatus.OK` on success. This is a design rule
         check, not a modelling detail: it is what makes the module safe to
         drive from swept parameters, because a violating parameter set fails
-        loudly here instead of silently producing a part with a 0.2 mm wall
-        or a bolt hole opening into the servo pocket.
+        loudly here instead of silently producing a part with a 0.2 mm wall.
 
         Raises
         ------
         PedestalDesignError
             Naming the first violated constraint.
         """
-        if self.total_height_mm <= 0.0:
+        # ---- U-profile sanity ---------------------------------------------
+        if self.turret_top_z_mm <= self.top_arm_thickness_mm:
             raise PedestalDesignError(
                 DesignStatus.NEGATIVE_HEIGHT,
-                f"total_height_mm must be positive, got {self.total_height_mm}.",
+                f"The turret must rise above the top arm: turret top "
+                f"{self.turret_top_z_mm:.2f} mm vs arm thickness "
+                f"{self.top_arm_thickness_mm:.2f} mm.",
             )
-        if self.jaw_thickness_mm >= self.total_height_mm:
+        if self.desk_seat_x_mm >= self.top_arm_inner_x_mm:
             raise PedestalDesignError(
                 DesignStatus.INVALID_PARAMETER,
-                f"jaw_thickness_mm ({self.jaw_thickness_mm}) must be less "
-                f"than total_height_mm ({self.total_height_mm}).",
+                f"The top arm has no depth: desk seats at "
+                f"{self.desk_seat_x_mm:.2f} mm, inner end at "
+                f"{self.top_arm_inner_x_mm:.2f} mm.",
             )
-        if self.pad_recess_depth_mm >= self.jaw_thickness_mm:
+        if not self.spine_outer_x_mm < self.spine_inner_x_mm <= self.desk_seat_x_mm:
+            raise PedestalDesignError(
+                DesignStatus.INVALID_PARAMETER,
+                f"Expected spine outer ({self.spine_outer_x_mm:.2f}) < spine "
+                f"inner ({self.spine_inner_x_mm:.2f}) <= desk seat "
+                f"({self.desk_seat_x_mm:.2f}); the gusset must reach the desk "
+                "seating plane exactly.",
+            )
+        if self.pad_recess_depth_mm >= self.top_arm_thickness_mm:
             raise PedestalDesignError(
                 DesignStatus.INVALID_PARAMETER,
                 f"pad_recess_depth_mm ({self.pad_recess_depth_mm}) must be "
-                f"less than the jaw thickness ({self.jaw_thickness_mm}), or "
-                "the recess cuts straight through the jaw.",
+                f"less than the top arm thickness "
+                f"({self.top_arm_thickness_mm}), or the recess cuts through.",
+            )
+        if self.gusset_size_mm >= self.throat_opening_mm / 2.0:
+            raise PedestalDesignError(
+                DesignStatus.FEATURE_COLLISION,
+                f"Gussets of {self.gusset_size_mm:.2f} mm would consume the "
+                f"{self.throat_opening_mm:.2f} mm throat from both sides.",
             )
 
-        # ---- Vertical ordering: jaw < ear shelf < cavity top < seat -------
-        seat_bottom_z = self.total_height_mm - self.bearing_seat_depth_mm
+        # ---- Vertical layout ordering, top arm up through the turret ------
+        seat_bottom_z = self.turret_top_z_mm - self.bearing_seat_depth_mm
         if not (
-            self.jaw_thickness_mm
+            self.top_arm_thickness_mm
             < self.ear_shelf_z_mm
             < self.cavity_top_z_mm
             < seat_bottom_z
         ):
             raise PedestalDesignError(
                 DesignStatus.FEATURE_COLLISION,
-                "Vertical layout is out of order: expected jaw top "
-                f"({self.jaw_thickness_mm:.2f}) < ear shelf "
+                "Vertical layout is out of order: expected top arm "
+                f"({self.top_arm_thickness_mm:.2f}) < ear shelf "
                 f"({self.ear_shelf_z_mm:.2f}) < cavity top "
                 f"({self.cavity_top_z_mm:.2f}) < bearing seat floor "
                 f"({seat_bottom_z:.2f}). The servo does not fit in the "
-                "available height.",
+                "available turret height.",
             )
-
-        # ---- Ceiling between the cavity and the bearing seat --------------
         ceiling = seat_bottom_z - self.cavity_top_z_mm
         if ceiling < self.min_wall_thickness_mm:
             raise PedestalDesignError(
@@ -457,29 +558,32 @@ class PedestalParameters:
                 f"{self.min_wall_thickness_mm:.2f} mm required.",
             )
 
-        # ---- Radial wall around the widest internal pocket ----------------
-        ear_corner_radius = math.hypot(
-            abs(self.cavity_offset_x_mm) + self.cavity_ear_length_mm / 2.0,
-            self.cavity_width_mm / 2.0,
-        )
-        radial_wall = self.body_radius_mm - ear_corner_radius
-        if radial_wall < self.min_wall_thickness_mm:
+        # ---- Turret must enclose the cavity and the seat -------------------
+        cavity_half_x = self.cavity_x_span_mm / 2.0
+        if self.turret_x_max_mm - cavity_half_x < self.min_wall_thickness_mm:
             raise PedestalDesignError(
                 DesignStatus.WALL_TOO_THIN,
-                f"Only {radial_wall:.2f} mm of wall between the ear slot corner "
-                f"(r = {ear_corner_radius:.2f} mm) and the body outer surface "
-                f"(r = {self.body_radius_mm:.2f} mm); "
-                f"{self.min_wall_thickness_mm:.2f} mm required. The servo is "
-                "too large for this body diameter.",
+                f"Only {self.turret_x_max_mm - cavity_half_x:.2f} mm of turret "
+                f"wall beside the servo cavity; "
+                f"{self.min_wall_thickness_mm:.2f} mm required.",
             )
-
-        # ---- Bearing seat must not undercut the body wall -----------------
-        seat_wall = self.body_radius_mm - self.bearing_seat_diameter_mm / 2.0
-        if seat_wall < self.min_wall_thickness_mm:
+        seat_radius = self.bearing_seat_diameter_mm / 2.0
+        if self.turret_x_max_mm - seat_radius < self.min_wall_thickness_mm:
             raise PedestalDesignError(
                 DesignStatus.WALL_TOO_THIN,
-                f"Only {seat_wall:.2f} mm between the bearing seat and the body "
-                f"outer surface; {self.min_wall_thickness_mm:.2f} mm required.",
+                f"Only {self.turret_x_max_mm - seat_radius:.2f} mm between the "
+                f"bearing seat and the turret's side; "
+                f"{self.min_wall_thickness_mm:.2f} mm required.",
+            )
+        cavity_y_min = self.cavity_offset_y_mm - self.cavity_ear_span_y_mm / 2.0
+        cavity_y_max = self.cavity_offset_y_mm + self.cavity_ear_span_y_mm / 2.0
+        if (cavity_y_min - self.turret_y_min_mm) < self.min_wall_thickness_mm or (
+            self.turret_y_max_mm - cavity_y_max
+        ) < self.min_wall_thickness_mm:
+            raise PedestalDesignError(
+                DesignStatus.WALL_TOO_THIN,
+                "The servo cavity reaches within "
+                f"{self.min_wall_thickness_mm:.2f} mm of the turret's ends.",
             )
         if self.shaft_bore_diameter_mm >= self.bearing_seat_diameter_mm:
             raise PedestalDesignError(
@@ -490,66 +594,100 @@ class PedestalParameters:
                 "have no floor for the outer race to sit on.",
             )
 
-        # ---- Clamp jaw ----------------------------------------------------
-        cavity_outer_x = self.cavity_offset_x_mm + self.cavity_ear_length_mm / 2.0
-        pad_gap = self.pad_inner_x_mm - cavity_outer_x
-        if pad_gap < self.min_wall_thickness_mm:
+        # ---- Turret must sit on the top arm, not overhang it --------------
+        if (
+            self.turret_x_min_mm < self.spine_inner_x_mm
+            or self.turret_x_max_mm > self.top_arm_inner_x_mm
+        ):
             raise PedestalDesignError(
                 DesignStatus.FEATURE_COLLISION,
-                f"Pad recess starts {pad_gap:.2f} mm outboard of the servo "
-                f"cavity, which ends at x = {cavity_outer_x:.2f} mm; "
-                f"{self.min_wall_thickness_mm:.2f} mm required or the recess "
-                "breaks into the open pocket under the servo.",
+                f"The turret spans x = {self.turret_x_min_mm:.2f} .. "
+                f"{self.turret_x_max_mm:.2f} mm but the top arm only covers "
+                f"{self.spine_inner_x_mm:.2f} .. {self.top_arm_inner_x_mm:.2f} mm, "
+                "so it would hang unsupported over the desk edge.",
             )
-        if self.desk_edge_window_mm <= 0.0:
+        half_width = self.clamp_width_mm / 2.0
+        if self.turret_y_min_mm < -half_width or self.turret_y_max_mm > half_width:
             raise PedestalDesignError(
                 DesignStatus.FEATURE_COLLISION,
-                "The clamp screw hole overlaps the pad recess; there is no "
-                "band left for the desk edge to sit in.",
+                f"The turret is wider than the clamp "
+                f"({self.clamp_width_mm:.2f} mm).",
             )
-        jaw_tip_wall = (
-            self.jaw_reach_mm
-            - self.bolt_axis_x_mm
-            - self.bolt_hole_diameter_mm / 2.0
+
+        # ---- Anti-slip pads ------------------------------------------------
+        for index, (x_min, x_max, y_min, y_max) in enumerate(self.pad_recesses):
+            if x_max - x_min <= 0.0 or y_max - y_min <= 0.0:
+                raise PedestalDesignError(
+                    DesignStatus.FEATURE_COLLISION,
+                    f"Pad recess {index} has no area: the servo cavity opening "
+                    "and the gusset leave no room on the top arm's underside.",
+                )
+
+        # ---- Clamping screw and captive nut --------------------------------
+        if self.bottom_arm_overhang_mm <= 0.0:
+            raise PedestalDesignError(
+                DesignStatus.FEATURE_COLLISION,
+                "The clamp screw lies outboard of the desk edge; its pressure "
+                "foot would press on air rather than the desk underside.",
+            )
+        foot_outer_x = (
+            self.bolt_axis_x_mm - self.pressure_foot_diameter_mm / 2.0
         )
-        if jaw_tip_wall < self.min_wall_thickness_mm:
+        if foot_outer_x < self.desk_seat_x_mm:
+            raise PedestalDesignError(
+                DesignStatus.FEATURE_COLLISION,
+                f"The pressure foot reaches x = {foot_outer_x:.2f} mm, outboard "
+                f"of where the desk seats ({self.desk_seat_x_mm:.2f} mm), so it "
+                "would press on the bottom gusset rather than the desk.",
+            )
+        if self.bolt_axis_x_mm + self.pressure_foot_diameter_mm / 2.0 > (
+            self.bottom_arm_inner_x_mm
+        ):
+            raise PedestalDesignError(
+                DesignStatus.FEATURE_COLLISION,
+                "The pressure foot overhangs the bottom arm's inboard end.",
+            )
+        nut_floor = self.bottom_arm_thickness_mm - self.nut_pocket_depth_mm
+        if nut_floor < self.min_wall_thickness_mm:
             raise PedestalDesignError(
                 DesignStatus.WALL_TOO_THIN,
-                f"Only {jaw_tip_wall:.2f} mm of jaw beyond the clamp screw "
-                f"hole; {self.min_wall_thickness_mm:.2f} mm required.",
+                f"Only {nut_floor:.2f} mm of floor above the nut pocket; "
+                f"{self.min_wall_thickness_mm:.2f} mm required. This floor "
+                "carries the whole clamp load.",
             )
-        jaw_side_wall = (
-            self.jaw_width_mm / 2.0 - self.bolt_hole_diameter_mm / 2.0
-        )
-        if jaw_side_wall < self.min_wall_thickness_mm:
-            raise PedestalDesignError(
-                DesignStatus.WALL_TOO_THIN,
-                f"Only {jaw_side_wall:.2f} mm between the clamp screw hole and "
-                f"the jaw's side; {self.min_wall_thickness_mm:.2f} mm required.",
-            )
-        if self.pad_width_mm > self.jaw_width_mm:
-            raise PedestalDesignError(
-                DesignStatus.INVALID_PARAMETER,
-                f"Pad width ({self.pad_width_mm:.2f} mm) exceeds the jaw width "
-                f"({self.jaw_width_mm:.2f} mm).",
-            )
-        knob_inner_x = self.bolt_axis_x_mm - self.knob_diameter_mm / 2.0
-        if knob_inner_x < self.body_radius_mm:
+        if self.bolt_hole_diameter_mm >= self.nut_pocket_across_flats_mm:
             raise PedestalDesignError(
                 DesignStatus.FEATURE_COLLISION,
-                f"The knob (dia {self.knob_diameter_mm:.1f} mm) would reach "
-                f"x = {knob_inner_x:.2f} mm and foul the pedestal body "
-                f"(r = {self.body_radius_mm:.2f} mm). Lengthen the jaw or fit "
-                "a smaller knob.",
+                f"Bolt hole ({self.bolt_hole_diameter_mm:.2f} mm) is not "
+                f"smaller than the nut pocket across flats "
+                f"({self.nut_pocket_across_flats_mm:.2f} mm), so the nut would "
+                "have no shoulder to bear against.",
+            )
+        nut_half = self.nut_pocket_across_corners_mm / 2.0
+        if half_width - nut_half < self.min_wall_thickness_mm:
+            raise PedestalDesignError(
+                DesignStatus.WALL_TOO_THIN,
+                "The nut pocket reaches within "
+                f"{self.min_wall_thickness_mm:.2f} mm of the clamp's side.",
+            )
+        if (self.bolt_axis_x_mm - nut_half) - self.spine_inner_x_mm < (
+            self.min_wall_thickness_mm
+        ):
+            raise PedestalDesignError(
+                DesignStatus.WALL_TOO_THIN,
+                "The nut pocket reaches within "
+                f"{self.min_wall_thickness_mm:.2f} mm of the spine.",
             )
 
         # ---- Servo retention screws must land in shelf material -----------
-        shelf_step = (self.cavity_ear_length_mm - self.cavity_body_length_mm) / 2.0
+        shelf_step = (
+            self.cavity_ear_span_y_mm - self.cavity_body_span_y_mm
+        ) / 2.0
         if shelf_step <= 0.0:
             raise PedestalDesignError(
                 DesignStatus.FEATURE_COLLISION,
-                f"Ear slot ({self.cavity_ear_length_mm:.2f} mm) is no longer "
-                f"than the body pocket ({self.cavity_body_length_mm:.2f} mm), "
+                f"Ear slot ({self.cavity_ear_span_y_mm:.2f} mm) is no longer "
+                f"than the body pocket ({self.cavity_body_span_y_mm:.2f} mm), "
                 "so there is no shelf for the servo's ears to rest on.",
             )
         shelf_height = self.cavity_top_z_mm - self.ear_shelf_z_mm
@@ -560,30 +698,30 @@ class PedestalParameters:
                 f"deep but the shelf is only {shelf_height:.2f} mm tall; they "
                 "would break through into the shaft bore region.",
             )
-        for index, (sx, sy) in enumerate(self.servo_screw_positions):
-            screw_outer = math.hypot(sx, sy) + self.servo_screw_hole_diameter_mm / 2.0
-            if self.body_radius_mm - screw_outer < self.min_wall_thickness_mm:
+        half_body_y = self.cavity_body_span_y_mm / 2.0
+        half_ear_y = self.cavity_ear_span_y_mm / 2.0
+        for index, (_, screw_y) in enumerate(self.servo_screw_positions):
+            offset = abs(screw_y - self.cavity_offset_y_mm)
+            if not half_body_y < offset < half_ear_y:
                 raise PedestalDesignError(
-                    DesignStatus.WALL_TOO_THIN,
-                    f"Servo screw {index} at ({sx:.2f}, {sy:.2f}) reaches "
-                    f"r = {screw_outer:.2f} mm, leaving "
-                    f"{self.body_radius_mm - screw_outer:.2f} mm of wall "
-                    f"against a body radius of {self.body_radius_mm:.2f} mm.",
+                    DesignStatus.FEATURE_COLLISION,
+                    f"Servo screw {index} at y = {screw_y:.2f} mm does not land "
+                    "in the retention shelf.",
                 )
 
-        # ---- Cable slot ---------------------------------------------------
-        if self.cable_slot_height_mm >= self.ear_shelf_z_mm - self.jaw_thickness_mm:
+        # ---- Cable slot ----------------------------------------------------
+        if self.cable_slot_height_mm >= self.ear_shelf_z_mm - self.top_arm_thickness_mm:
             raise PedestalDesignError(
                 DesignStatus.FEATURE_COLLISION,
                 f"Cable slot ({self.cable_slot_height_mm:.2f} mm tall) does not "
-                f"fit between the jaw top ({self.jaw_thickness_mm:.2f} mm) "
+                f"fit between the top arm ({self.top_arm_thickness_mm:.2f} mm) "
                 f"and the ear shelf ({self.ear_shelf_z_mm:.2f} mm).",
             )
-        if self.cable_slot_width_mm >= self.cavity_width_mm:
+        if self.cable_slot_width_mm >= self.cavity_ear_span_y_mm:
             raise PedestalDesignError(
                 DesignStatus.INVALID_PARAMETER,
                 f"Cable slot width ({self.cable_slot_width_mm:.2f} mm) must be "
-                f"less than the cavity width ({self.cavity_width_mm:.2f} mm).",
+                f"less than the cavity ({self.cavity_ear_span_y_mm:.2f} mm).",
             )
 
         return DesignStatus.OK
@@ -596,70 +734,82 @@ class PedestalParameters:
         """Human-readable dimension summary, printed by ``--report``."""
         hardware = DEFAULT_HARDWARE if hardware is None else hardware
         clamp = hardware.desk_clamp
-        seat_bottom_z = self.total_height_mm - self.bearing_seat_depth_mm
-        ear_corner_radius = math.hypot(
-            abs(self.cavity_offset_x_mm) + self.cavity_ear_length_mm / 2.0,
-            self.cavity_width_mm / 2.0,
+        seat_bottom_z = self.turret_top_z_mm - self.bearing_seat_depth_mm
+        max_torque = clamp.max_tightening_torque_nm(
+            self.clamp_width_mm, self.bottom_arm_overhang_mm
         )
-        max_torque = clamp.max_tightening_torque_nm(self.jaw_overhang_mm)
+        hand_torque = clamp.hand_torque_limit_nm()
+        tipping = DEFAULT_ARM.tipping_moment_nm()
+        needed_preload = tipping / (self.tipping_lever_arm_mm / 1000.0)
         return (
-            f"Base pedestal parameters\n"
-            f"------------------------\n"
-            f"  Total height           : {self.total_height_mm:.2f} mm\n"
-            f"  Body outer diameter    : {2 * self.body_radius_mm:.2f} mm\n"
+            f"Base pedestal (monolithic U-clamp)\n"
+            f"----------------------------------\n"
+            f"  Overall envelope       : "
+            f"{self.top_arm_inner_x_mm - self.spine_outer_x_mm:.2f} (X) x "
+            f"{self.clamp_width_mm:.2f} (Y) x {self.overall_height_mm:.2f} (Z) mm\n"
+            f"  Desk seats at x        : {self.desk_seat_x_mm:.2f} mm "
+            f"(yaw axis at x = 0, against the gusset)\n"
+            f"  Top arm                : x {self.spine_inner_x_mm:.1f}.."
+            f"{self.top_arm_inner_x_mm:.1f}, z 0..{self.top_arm_thickness_mm:.1f}\n"
+            f"  Spine                  : x {self.spine_outer_x_mm:.1f}.."
+            f"{self.spine_inner_x_mm:.1f}, z {self.bottom_arm_bottom_z_mm:.1f}.."
+            f"{self.top_arm_thickness_mm:.1f}\n"
+            f"  Bottom arm             : x {self.spine_inner_x_mm:.1f}.."
+            f"{self.bottom_arm_inner_x_mm:.1f}, z "
+            f"{self.bottom_arm_bottom_z_mm:.1f}..{self.throat_bottom_z_mm:.1f}\n"
+            f"  Throat                 : {self.throat_opening_mm:.1f} mm for "
+            f"{clamp.min_desk_thickness_mm:.0f}-"
+            f"{clamp.max_desk_thickness_mm:.0f} mm desks\n"
+            f"  Gussets                : {self.gusset_size_mm:.1f} mm at both "
+            f"inner corners\n"
             f"\n"
-            f"  Servo cavity (body)    : {self.cavity_body_length_mm:.2f} x "
-            f"{self.cavity_width_mm:.2f} mm\n"
-            f"  Servo cavity (ears)    : {self.cavity_ear_length_mm:.2f} x "
-            f"{self.cavity_width_mm:.2f} mm\n"
-            f"  Cavity X offset        : {self.cavity_offset_x_mm:.2f} mm "
+            f"  Servo turret           : x {self.turret_x_min_mm:.2f}.."
+            f"{self.turret_x_max_mm:.2f}, y {self.turret_y_min_mm:.2f}.."
+            f"{self.turret_y_max_mm:.2f}, z {self.top_arm_thickness_mm:.1f}.."
+            f"{self.turret_top_z_mm:.1f}\n"
+            f"  Servo cavity           : {self.cavity_x_span_mm:.2f} (X) x "
+            f"{self.cavity_body_span_y_mm:.2f} (Y) body, "
+            f"{self.cavity_ear_span_y_mm:.2f} (Y) ears\n"
+            f"  Cavity Y offset        : {self.cavity_offset_y_mm:.2f} mm "
             f"(puts the output shaft on the yaw axis)\n"
             f"  Ear shelf at z         : {self.ear_shelf_z_mm:.2f} mm\n"
-            f"  Cavity ceiling at z    : {self.cavity_top_z_mm:.2f} mm\n"
-            f"\n"
-            f"  Shaft bore             : {self.shaft_bore_diameter_mm:.2f} mm dia\n"
-            f"  Bearing seat           : {self.bearing_seat_diameter_mm:.2f} mm dia "
-            f"x {self.bearing_seat_depth_mm:.2f} mm deep (floor at z = "
+            f"  Bearing seat           : {self.bearing_seat_diameter_mm:.2f} mm "
+            f"dia x {self.bearing_seat_depth_mm:.2f} mm deep (floor at z = "
             f"{seat_bottom_z:.2f})\n"
             f"\n"
-            f"  Clamp upper jaw        : {self.jaw_reach_mm:.2f} mm reach x "
-            f"{self.jaw_width_mm:.2f} mm wide x {self.jaw_thickness_mm:.2f} mm thick\n"
-            f"  Pad recess             : {self.pad_length_mm:.1f} x "
-            f"{self.pad_width_mm:.1f} x {self.pad_recess_depth_mm:.1f} mm deep, "
-            f"x = {self.pad_inner_x_mm:.2f}..{self.pad_outer_x_mm:.2f}\n"
-            f"  Clamp screw hole       : {self.bolt_hole_diameter_mm:.2f} mm dia "
+            f"  Anti-slip pads         : 2 strips, "
+            + ", ".join(
+                f"{x_max - x_min:.2f} x {y_max - y_min:.2f}"
+                for x_min, x_max, y_min, y_max in self.pad_recesses
+            )
+            + f" mm ({self.pad_area_mm2:.0f} mm2 total)\n"
+            f"  Clamp screw            : {self.bolt_hole_diameter_mm:.2f} mm dia "
             f"at x = {self.bolt_axis_x_mm:.2f} mm\n"
-            f"  Desk edge window       : x = {self.pad_outer_x_mm:.2f}.."
-            f"{self.bolt_axis_x_mm - self.bolt_hole_diameter_mm / 2.0:.2f} mm "
-            f"({self.desk_edge_window_mm:.1f} mm wide)\n"
-            f"\n"
-            f"  Servo screws           : 4 x "
-            f"{self.servo_screw_hole_diameter_mm:.2f} mm, "
-            f"{self.servo_screw_hole_depth_mm:.2f} mm deep\n"
-            f"  Thinnest radial wall   : "
-            f"{self.body_radius_mm - ear_corner_radius:.2f} mm "
-            f"(minimum {self.min_wall_thickness_mm:.2f} mm)\n"
-            f"  Ceiling thickness      : "
-            f"{seat_bottom_z - self.cavity_top_z_mm:.2f} mm\n"
+            f"  Nut pocket             : {self.nut_pocket_across_flats_mm:.2f} mm "
+            f"across flats x {self.nut_pocket_depth_mm:.2f} mm deep (underside)\n"
             f"\n"
             f"  Clamp mechanics\n"
-            f"    jaw overhang (worst) : {self.jaw_overhang_mm:.2f} mm\n"
+            f"    bottom arm overhang  : {self.bottom_arm_overhang_mm:.2f} mm\n"
             f"    tipping lever arm    : {self.tipping_lever_arm_mm:.2f} mm\n"
-            f"    arm tipping moment   : {DEFAULT_ARM.tipping_moment_nm():.2f} N.m\n"
-            f"    preload needed       : "
-            f"{DEFAULT_ARM.tipping_moment_nm() / (self.tipping_lever_arm_mm / 1000.0):.0f} N "
-            f"({clamp.preload_to_torque_nm(DEFAULT_ARM.tipping_moment_nm() / (self.tipping_lever_arm_mm / 1000.0)):.2f} N.m at the knob)\n"
-            f"    MAX safe knob torque : {max_torque:.2f} N.m  "
-            f"<-- hand-tight only, do not use a wrench\n"
+            f"    arm tipping moment   : {tipping:.2f} N.m (worst case)\n"
+            f"    preload needed       : {needed_preload:.0f} N "
+            f"({clamp.preload_to_torque_nm(needed_preload):.2f} N.m at the knob)\n"
+            f"    hand torque available: {hand_torque:.2f} N.m on a "
+            f"{clamp.knob_diameter_mm:.0f} mm knob -> "
+            f"{clamp.bolt_preload_n(hand_torque):.0f} N\n"
+            f"    grip margin          : "
+            f"{clamp.bolt_preload_n(hand_torque) / needed_preload:.2f}x\n"
+            f"    bottom arm limit     : {max_torque:.2f} N.m "
+            f"({'hand cannot reach it' if max_torque > hand_torque else 'REACHABLE BY HAND'})\n"
         )
 
 
 def build_pedestal(params: Optional[PedestalParameters] = None) -> Part:
     """
-    Construct the pedestal solid, including the clamp's upper jaw.
+    Construct the U-clamp solid.
 
-    Built in build123d's algebra mode: start with the body and jaw as a union
-    of solid stock, then subtract each internal feature. Every subtraction is
+    Built in build123d's algebra mode: union the three limbs of the U plus the
+    turret and gussets, then subtract each internal feature. Every operation is
     positioned from ``params``, so the model has no literals of its own.
 
     Parameters
@@ -670,7 +820,7 @@ def build_pedestal(params: Optional[PedestalParameters] = None) -> Part:
     Returns
     -------
     build123d.Part
-        A single solid, origin on the yaw axis at desk level, +Z up.
+        A single solid. Origin on the yaw axis at the desk's top surface.
 
     Raises
     ------
@@ -680,71 +830,90 @@ def build_pedestal(params: Optional[PedestalParameters] = None) -> Part:
     params = PedestalParameters.from_geometry() if params is None else params
     params.validate()
 
+    width = params.clamp_width_mm
     bottom = (Align.CENTER, Align.CENTER, Align.MIN)
 
-    # ---- Solid stock: pedestal column plus the clamp's upper jaw ---------
-    part = Cylinder(
-        radius=params.body_radius_mm,
-        height=params.total_height_mm,
-        align=bottom,
+    def slab(x_min, x_max, z_min, z_max, y_span=None):
+        """A box spanning the given X and Z range, centred on Y."""
+        y_span = width if y_span is None else y_span
+        return Pos((x_min + x_max) / 2.0, 0, z_min) * Box(
+            x_max - x_min, y_span, z_max - z_min, align=bottom
+        )
+
+    # ---- The three limbs of the U, as one solid ---------------------------
+    part = slab(
+        params.spine_inner_x_mm, params.top_arm_inner_x_mm,
+        0.0, params.top_arm_thickness_mm,
     )
-    part += Pos(params.jaw_reach_mm / 2.0, 0, 0) * Box(
-        params.jaw_reach_mm,
-        params.jaw_width_mm,
-        params.jaw_thickness_mm,
+    part += slab(
+        params.spine_outer_x_mm, params.spine_inner_x_mm,
+        params.bottom_arm_bottom_z_mm, params.top_arm_thickness_mm,
+    )
+    part += slab(
+        params.spine_inner_x_mm, params.bottom_arm_inner_x_mm,
+        params.bottom_arm_bottom_z_mm, params.throat_bottom_z_mm,
+    )
+
+    # ---- Servo turret rising from the top arm -----------------------------
+    part += Pos(
+        (params.turret_x_min_mm + params.turret_x_max_mm) / 2.0,
+        (params.turret_y_min_mm + params.turret_y_max_mm) / 2.0,
+        params.top_arm_thickness_mm,
+    ) * Box(
+        params.turret_x_max_mm - params.turret_x_min_mm,
+        params.turret_y_max_mm - params.turret_y_min_mm,
+        params.turret_top_z_mm - params.top_arm_thickness_mm,
         align=bottom,
     )
 
-    # ---- Servo cavity, lower section: wide enough to pass the ears -------
-    # Open at the bottom so the servo is inserted from underneath and pushed
-    # up until its ears meet the shelf where this section ends. Subtracted
-    # after the jaw union so the jaw does not seal the insertion path.
-    part -= Pos(params.cavity_offset_x_mm, 0, 0) * Box(
-        params.cavity_ear_length_mm,
-        params.cavity_width_mm,
+    # ---- Gussets at the two inner corners of the U ------------------------
+    # Upper: hangs down from the top arm's underside beside the spine.
+    part += (
+        Pos(params.spine_inner_x_mm, 0, 0)
+        * Rot(180, 0, 0)
+        * right_triangle_prism(params.gusset_size_mm, params.gusset_size_mm, width)
+    )
+    # Lower: rises from the bottom arm's top face beside the spine.
+    part += Pos(
+        params.spine_inner_x_mm, 0, params.throat_bottom_z_mm
+    ) * right_triangle_prism(
+        params.gusset_size_mm, params.gusset_size_mm, width
+    )
+
+    # ---- Servo cavity, lower section: wide enough to pass the ears --------
+    # Open at the top arm's underside so the servo is inserted from below and
+    # pushed up until its ears meet the shelf where this section ends.
+    part -= Pos(0, params.cavity_offset_y_mm, 0) * Box(
+        params.cavity_x_span_mm,
+        params.cavity_ear_span_y_mm,
         params.ear_shelf_z_mm,
         align=bottom,
     )
 
     # ---- Servo cavity, upper section: body only. The step between the two
-    #      widths IS the retention shelf. -------------------------------
-    part -= Pos(params.cavity_offset_x_mm, 0, params.ear_shelf_z_mm) * Box(
-        params.cavity_body_length_mm,
-        params.cavity_width_mm,
+    #      spans IS the retention shelf. ---------------------------------
+    part -= Pos(
+        0, params.cavity_offset_y_mm, params.ear_shelf_z_mm
+    ) * Box(
+        params.cavity_x_span_mm,
+        params.cavity_body_span_y_mm,
         params.cavity_top_z_mm - params.ear_shelf_z_mm,
         align=bottom,
     )
 
-    # ---- Output shaft bore through the ceiling, on the yaw axis ----------
+    # ---- Output shaft bore through the ceiling, on the yaw axis -----------
     part -= Pos(0, 0, params.cavity_top_z_mm) * Cylinder(
         radius=params.shaft_bore_diameter_mm / 2.0,
-        height=params.total_height_mm - params.cavity_top_z_mm,
+        height=params.turret_top_z_mm - params.cavity_top_z_mm,
         align=bottom,
     )
 
-    # ---- 608ZZ press-fit seat in the top face ----------------------------
+    # ---- 608ZZ press-fit seat in the turret's top face --------------------
     part -= Pos(
-        0, 0, params.total_height_mm - params.bearing_seat_depth_mm
+        0, 0, params.turret_top_z_mm - params.bearing_seat_depth_mm
     ) * Cylinder(
         radius=params.bearing_seat_diameter_mm / 2.0,
         height=params.bearing_seat_depth_mm,
-        align=bottom,
-    )
-
-    # ---- Anti-slip pad recess in the jaw's underside ---------------------
-    part -= Pos(
-        params.pad_inner_x_mm + params.pad_length_mm / 2.0, 0, 0
-    ) * Box(
-        params.pad_length_mm,
-        params.pad_width_mm,
-        params.pad_recess_depth_mm,
-        align=bottom,
-    )
-
-    # ---- Clamp screw through-hole ----------------------------------------
-    part -= Pos(params.bolt_axis_x_mm, 0, 0) * Cylinder(
-        radius=params.bolt_hole_diameter_mm / 2.0,
-        height=params.jaw_thickness_mm,
         align=bottom,
     )
 
@@ -757,12 +926,37 @@ def build_pedestal(params: Optional[PedestalParameters] = None) -> Part:
             align=bottom,
         )
 
-    # ---- Radial cable slot, on -X so the lead exits away from the clamp --
-    slot_z = params.jaw_thickness_mm + (
-        params.ear_shelf_z_mm - params.jaw_thickness_mm - params.cable_slot_height_mm
+    # ---- Anti-slip pad recesses in the top arm's underside ----------------
+    for x_min, x_max, y_min, y_max in params.pad_recesses:
+        part -= Pos(
+            (x_min + x_max) / 2.0, (y_min + y_max) / 2.0, 0.0
+        ) * Box(
+            x_max - x_min,
+            y_max - y_min,
+            params.pad_recess_depth_mm,
+            align=bottom,
+        )
+
+    # ---- Clamp screw through-hole and captive nut pocket ------------------
+    part -= Pos(
+        params.bolt_axis_x_mm, 0, params.bottom_arm_bottom_z_mm
+    ) * Cylinder(
+        radius=params.bolt_hole_diameter_mm / 2.0,
+        height=params.bottom_arm_thickness_mm,
+        align=bottom,
+    )
+    part -= Pos(
+        params.bolt_axis_x_mm, 0, params.bottom_arm_bottom_z_mm
+    ) * hex_prism(params.nut_pocket_across_flats_mm, params.nut_pocket_depth_mm)
+
+    # ---- Cable slot out through the turret's inboard wall -----------------
+    slot_z = params.top_arm_thickness_mm + (
+        params.ear_shelf_z_mm
+        - params.top_arm_thickness_mm
+        - params.cable_slot_height_mm
     ) / 2.0
-    part -= Pos(-params.body_radius_mm / 2.0, 0, slot_z) * Box(
-        params.body_radius_mm,
+    part -= Pos(params.turret_x_max_mm / 2.0, 0, slot_z) * Box(
+        params.turret_x_max_mm,
         params.cable_slot_width_mm,
         params.cable_slot_height_mm,
         align=bottom,
@@ -777,11 +971,6 @@ def export_pedestal(
 ) -> Path:
     """
     Build the pedestal and write it to an STL, creating parent directories.
-
-    Returns
-    -------
-    Path
-        The path actually written.
 
     Raises
     ------
@@ -830,8 +1019,7 @@ def main(argv: Optional[list] = None) -> int:
         return 0
 
     written = export_pedestal(args.output, params)
-    size_kb = written.stat().st_size / 1024.0
-    print(f"Wrote {written}  ({size_kb:.1f} KB)")
+    print(f"Wrote {written}  ({written.stat().st_size / 1024.0:.1f} KB)")
     return 0
 
 

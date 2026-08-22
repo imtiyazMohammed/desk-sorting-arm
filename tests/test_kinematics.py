@@ -42,11 +42,34 @@ class TestGeometry:
         assert DEFAULT_ARM.safe_reach_mm == pytest.approx(950.0 * 0.85)
 
     def test_worst_case_desk_corner_matches_geometry(self):
-        # base at (600, 0) on 1200x600 desk => corner at (0, 600) or (1200, 600)
-        # distance = sqrt(600^2 + 600^2) = 848.528 mm
+        # Base at (600, 30) on a 1200x600 desk. Session D.1c moved it 30 mm
+        # inward: the U-clamp puts the yaw axis that far from the desk edge.
+        # Farthest corners are (0, 600) and (1200, 600):
+        #   distance = sqrt(600^2 + 570^2) = 827.587 mm
         assert DEFAULT_ARM.worst_case_desk_reach_mm() == pytest.approx(
-            np.sqrt(600.0**2 + 600.0**2), abs=1e-6
+            np.sqrt(600.0**2 + 570.0**2), abs=1e-6
         )
+
+    def test_moving_the_base_inward_shortens_the_worst_corner(self):
+        """The clamp's 30 mm inset is a small reach win, not a cost."""
+        at_edge = ArmGeometry(base_y_on_desk_mm=0.0)
+        assert DEFAULT_ARM.worst_case_desk_reach_mm() < (
+            at_edge.worst_case_desk_reach_mm()
+        )
+
+    def test_worst_corner_sits_between_the_two_reach_thresholds(self):
+        """
+        Documents a known disagreement rather than papering over it.
+
+        safe_reach_mm is 85% of full extension, a conservative round number,
+        while docs/PROOF_OF_CONCEPT.md section 2.1 sized the links against 89%.
+        The far desk corners land between the two, so coverage_report() says
+        "not reachable" while the arm is inside the envelope it was designed
+        for. If a future change moves the corner outside 89%, this test fails.
+        """
+        worst = DEFAULT_ARM.worst_case_desk_reach_mm()
+        assert worst > DEFAULT_ARM.safe_reach_mm
+        assert worst < 0.89 * DEFAULT_ARM.total_reach_mm
 
     def test_joint_limit_ordering(self):
         with pytest.raises(ValueError):

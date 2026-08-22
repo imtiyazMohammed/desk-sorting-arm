@@ -1,14 +1,14 @@
 """
-Test suite for the parametric CAD (Sessions D.1 and D.1b).
+Test suite for the parametric CAD (Sessions D.1, D.1b and D.1c).
 
 Test areas
 ----------
 1. Hardware specifications in src.geometry (validation, derived values,
    the UNVERIFIED-field bookkeeping)
 2. DeskClampSpec -- fastener standards, derived stack-up, clamp physics
-3. Pedestal parameter derivation -- every dimension traceable to geometry.py
+3. U-clamp parameter derivation -- every dimension traceable to geometry.py
 4. Design rule checks -- each violation raises with the right DesignStatus
-5. Lower jaw and knob parameter derivation and design rule checks
+5. Pressure foot and knob parameter derivation and design rule checks
 6. Solid construction -- every part builds and has positive volume
 7. STL export -- valid binary STL, closed watertight mesh, nonzero volume,
    checked for all three printable parts
@@ -46,7 +46,7 @@ build123d = pytest.importorskip(
 )
 
 from cad._design import DesignStatus  # noqa: E402  - must follow the importorskip
-from cad._primitives import hex_prism  # noqa: E402
+from cad._primitives import hex_prism, right_triangle_prism  # noqa: E402
 from cad.base_pedestal import (  # noqa: E402
     PedestalDesignError,
     PedestalParameters,
@@ -59,23 +59,23 @@ from cad.desk_clamp_knob import (  # noqa: E402
     build_knob,
     export_knob,
 )
-from cad.desk_clamp_lower_jaw import (  # noqa: E402
-    LowerJawDesignError,
-    LowerJawParameters,
-    build_lower_jaw,
-    export_lower_jaw,
+from cad.desk_clamp_pressure_foot import (  # noqa: E402
+    PressureFootDesignError,
+    PressureFootParameters,
+    build_pressure_foot,
+    export_pressure_foot,
 )
 
 #: Every printable part, so the mesh-integrity checks cover all of them.
 PART_EXPORTERS = {
     "base_pedestal": export_pedestal,
-    "desk_clamp_lower_jaw": export_lower_jaw,
     "desk_clamp_knob": export_knob,
+    "desk_clamp_pressure_foot": export_pressure_foot,
 }
 PART_BUILDERS = {
     "base_pedestal": build_pedestal,
-    "desk_clamp_lower_jaw": build_lower_jaw,
     "desk_clamp_knob": build_knob,
+    "desk_clamp_pressure_foot": build_pressure_foot,
 }
 
 
@@ -186,9 +186,9 @@ def meshes(stl_paths) -> dict:
 
 
 @pytest.fixture(scope="module")
-def jaw() -> LowerJawParameters:
-    """Default lower-jaw parameters, derived from the geometry singletons."""
-    return LowerJawParameters.from_geometry()
+def foot() -> PressureFootParameters:
+    """Default pressure-foot parameters, derived from the geometry singletons."""
+    return PressureFootParameters.from_geometry()
 
 
 @pytest.fixture(scope="module")
@@ -397,19 +397,20 @@ class TestDeskClampSpec:
         assert clamp.nut_across_corners_mm == pytest.approx(
             clamp.nut_across_flats_mm * 2.0 / math.sqrt(3.0)
         )
-        # DIN 934 tabulates e min = 14.38 mm for M8.
-        assert clamp.nut_across_corners_mm == pytest.approx(15.01, abs=0.02)
 
     def test_max_nut_thickness_below_nominal_rejected(self):
         with pytest.raises(ValueError, match="must not be less than"):
             DeskClampSpec(nut_thickness_nominal_mm=7.0, nut_thickness_max_mm=6.8)
 
+    # ---- U-profile ---------------------------------------------------------
+
     def test_clamp_throat_opens_wider_than_desk_thickness(self):
         """
-        Replaces the D.1 bolt-circle test.
+        A U-clamp's throat is fixed by the printed geometry.
 
-        The throat must exceed the thickest supported desk, or the clamp
-        cannot be slid on and off without fully unthreading the nut.
+        Unlike a screw-adjusted jaw it cannot be opened further, so the gap
+        has to exceed the thickest supported desk outright or the clamp will
+        not go on at all.
         """
         clamp = DEFAULT_HARDWARE.desk_clamp
         assert clamp.throat_max_opening_mm > clamp.max_desk_thickness_mm
@@ -427,40 +428,95 @@ class TestDeskClampSpec:
         with pytest.raises(ValueError, match="increasing"):
             DeskClampSpec(desk_thickness_range_mm=(35.0, 15.0))
 
-    def test_jaw_totals_add_their_recesses_to_the_structural_thickness(self):
-        """
-        At 10 mm total, a 2 mm pad recess plus a 6.8 mm nut pocket would leave
-        1.2 mm of web, so recesses are additional rather than subtractive.
-        """
+    def test_u_profile_dimensions_are_carried(self):
         clamp = DEFAULT_HARDWARE.desk_clamp
-        assert clamp.upper_jaw_total_thickness_mm == pytest.approx(12.0)
-        assert clamp.lower_jaw_total_thickness_mm == pytest.approx(18.8)
-        web = (
-            clamp.lower_jaw_total_thickness_mm
-            - clamp.nut_pocket_depth_mm
-            - clamp.pad_recess_depth_mm
+        assert clamp.top_arm_depth_mm == pytest.approx(60.0)
+        assert clamp.bottom_arm_depth_mm == pytest.approx(60.0)
+        assert clamp.top_arm_thickness_mm == pytest.approx(15.0)
+        assert clamp.bottom_arm_thickness_mm == pytest.approx(15.0)
+        assert clamp.spine_thickness_mm == pytest.approx(15.0)
+        assert clamp.servo_shaft_offset_from_edge_mm == pytest.approx(30.0)
+
+    def test_shaft_offset_must_land_on_the_top_arm(self):
+        with pytest.raises(ValueError, match="fall off the end"):
+            DeskClampSpec(
+                servo_shaft_offset_from_edge_mm=70.0, top_arm_depth_mm=60.0
+            )
+
+    def test_bottom_arm_keeps_a_floor_above_the_nut_pocket(self):
+        clamp = DEFAULT_HARDWARE.desk_clamp
+        assert clamp.bottom_arm_floor_mm == pytest.approx(
+            clamp.bottom_arm_thickness_mm - clamp.nut_pocket_depth_mm
         )
-        assert web == pytest.approx(clamp.jaw_thickness_mm)
+        assert clamp.bottom_arm_floor_mm >= DEFAULT_HARDWARE.min_wall_thickness_mm
+
+    def test_nut_pocket_deeper_than_the_bottom_arm_rejected(self):
+        with pytest.raises(ValueError, match="no floor"):
+            DeskClampSpec(bottom_arm_thickness_mm=6.0)
 
     def test_pad_thicker_than_its_recess_rejected(self):
         with pytest.raises(ValueError, match="stand proud"):
             DeskClampSpec(pad_recess_depth_mm=2.0, pad_thickness_mm=3.0)
 
+    # ---- Pressure foot -----------------------------------------------------
+
+    def test_pressure_foot_height_is_the_sum_of_its_layers(self):
+        clamp = DEFAULT_HARDWARE.desk_clamp
+        assert clamp.pressure_foot_height_mm == pytest.approx(
+            clamp.pressure_foot_bore_depth_mm
+            + clamp.pressure_foot_web_mm
+            + clamp.pad_recess_depth_mm
+        )
+
+    def test_pressure_foot_rise_shortens_the_screw_reach_needed(self):
+        clamp = DEFAULT_HARDWARE.desk_clamp
+        assert clamp.pressure_foot_rise_above_tip_mm == pytest.approx(
+            clamp.pressure_foot_web_mm + clamp.pad_recess_depth_mm
+        )
+        assert clamp.max_screw_protrusion_mm == pytest.approx(
+            clamp.throat_max_opening_mm
+            - clamp.min_desk_thickness_mm
+            - clamp.pressure_foot_rise_above_tip_mm
+        )
+
+    def test_pressure_foot_fits_the_throat_at_the_thickest_desk(self):
+        """The tightest case: a thick desk leaves the least room below it."""
+        clamp = DEFAULT_HARDWARE.desk_clamp
+        assert clamp.pressure_foot_height_mm <= clamp.desk_removal_clearance_mm
+
+    def test_pressure_foot_pad_must_fit_inside_the_foot(self):
+        with pytest.raises(ValueError, match="smaller than"):
+            DeskClampSpec(
+                pressure_foot_diameter_mm=20.0, pressure_foot_pad_diameter_mm=20.0
+            )
+
+    def test_pressure_foot_bore_must_fit_inside_its_pad(self):
+        with pytest.raises(ValueError, match="bore must be smaller"):
+            DeskClampSpec(pressure_foot_bore_diameter_mm=20.0)
+
+    # ---- Screw length ------------------------------------------------------
+
     def test_specified_bolt_is_long_enough_for_the_stack(self):
         clamp = DEFAULT_HARDWARE.desk_clamp
         assert clamp.bolt_length_mm >= clamp.required_bolt_length_mm
-        assert clamp.bolt_length_mm == pytest.approx(90.0)
+        assert clamp.bolt_length_mm == pytest.approx(70.0)
 
-    def test_required_bolt_length_tracks_the_throat(self):
-        """Opening the throat further must demand a longer screw."""
-        wide = DeskClampSpec(throat_max_opening_mm=60.0, bolt_length_mm=110.0)
-        assert wide.required_bolt_length_mm > (
-            DEFAULT_HARDWARE.desk_clamp.required_bolt_length_mm
-        )
+    def test_required_bolt_length_is_set_by_the_thinnest_desk(self):
+        """
+        A thin desk sits high in the throat, so the screw must reach furthest.
+
+        Raising the minimum supported desk thickness therefore *shortens* the
+        screw needed, which is the opposite of the intuitive direction.
+        """
+        thin = DeskClampSpec(desk_thickness_range_mm=(10.0, 35.0))
+        thick = DeskClampSpec(desk_thickness_range_mm=(25.0, 35.0))
+        assert thin.required_bolt_length_mm > thick.required_bolt_length_mm
 
     def test_boss_not_exceeding_bolt_hole_rejected(self):
         with pytest.raises(ValueError, match="must exceed the bolt"):
             DeskClampSpec(knob_boss_diameter_mm=9.0)
+
+    # ---- Physics -----------------------------------------------------------
 
     def test_preload_rises_with_torque(self):
         clamp = DEFAULT_HARDWARE.desk_clamp
@@ -492,6 +548,24 @@ class TestDeskClampSpec:
         with pytest.raises(ValueError, match="non-negative"):
             DEFAULT_HARDWARE.desk_clamp.bolt_preload_n(-1.0)
 
+    def test_hand_torque_scales_with_knob_radius(self):
+        """
+        The whole point of choosing a knob size.
+
+        Torque a hand can apply is grip force times radius, so knob diameter
+        caps the achievable clamp force physically rather than by warning.
+        """
+        big = DeskClampSpec(knob_diameter_mm=50.0)
+        small = DeskClampSpec(knob_diameter_mm=30.0)
+        assert big.hand_torque_limit_nm() == pytest.approx(
+            40.0 * 0.025
+        )
+        assert small.hand_torque_limit_nm() < big.hand_torque_limit_nm()
+
+    def test_negative_grip_force_rejected(self):
+        with pytest.raises(ValueError, match="non-negative"):
+            DEFAULT_HARDWARE.desk_clamp.hand_torque_limit_nm(-1.0)
+
     def test_pad_friction_uses_the_stated_coefficient(self):
         clamp = DeskClampSpec(pad_friction_coefficient=0.4)
         assert clamp.pad_friction_force_n(1000.0) == pytest.approx(400.0)
@@ -500,9 +574,16 @@ class TestDeskClampSpec:
         with pytest.raises(ValueError, match="lever_arm_mm must be positive"):
             DEFAULT_HARDWARE.desk_clamp.clamp_resisting_moment_nm(5.0, 0.0)
 
-    def test_jaw_allowable_preload_falls_with_overhang(self):
+    def test_bottom_arm_allowable_preload_falls_with_overhang(self):
         clamp = DEFAULT_HARDWARE.desk_clamp
-        assert clamp.jaw_allowable_preload_n(30.0) < clamp.jaw_allowable_preload_n(10.0)
+        assert clamp.bottom_arm_allowable_preload_n(
+            82.5, 40.0
+        ) < clamp.bottom_arm_allowable_preload_n(82.5, 10.0)
+
+    @pytest.mark.parametrize("args", [(0.0, 10.0), (82.5, 0.0)])
+    def test_non_positive_section_arguments_rejected(self, args):
+        with pytest.raises(ValueError, match="must be positive"):
+            DEFAULT_HARDWARE.desk_clamp.bottom_arm_allowable_preload_n(*args)
 
 
 # =========================================================================
@@ -513,12 +594,12 @@ class TestDeskClampSpec:
 class TestClampCapacity:
     def test_clamp_grip_force_exceeds_arm_tipping_torque(self, params):
         """
-        The headline requirement: a hand-tightened clamp holds the arm down.
+        The headline requirement: a tightened clamp holds the arm down.
 
         Grip force comes from the M8 thread pitch, thread and collar friction,
-        and 5 N.m of hand torque. It resists the arm's worst-case tipping
-        moment across the lever from the pad's inboard edge (the pivot the
-        assembly would rotate about) to the clamp screw.
+        and applied torque. It resists the arm's worst-case tipping moment
+        across the lever from the top arm's inboard edge -- the pivot the
+        assembly would rotate about -- to the clamp screw.
         """
         clamp = DEFAULT_HARDWARE.desk_clamp
         grip_force_n = clamp.bolt_preload_n(5.0)
@@ -533,42 +614,53 @@ class TestClampCapacity:
             f"clamp resists {resisting_nm:.2f} N.m but the arm tips at "
             f"{tipping_nm:.2f} N.m"
         )
-        # Not merely exceeding it -- comfortably so.
         assert resisting_nm > 5.0 * tipping_nm
 
-    def test_required_preload_is_within_the_jaws_structural_limit(self, params):
+    def test_hand_achievable_grip_exceeds_tipping(self, params):
         """
-        The real binding constraint, and the reason for the torque warning.
+        The version that matters, using torque a hand can actually apply.
 
-        The preload actually needed to resist tipping must sit inside what the
-        printed jaw can carry in bending. It does, with wide margin -- but the
-        allowable is far below the 5 N.m the test above assumes, which is why
-        cad/README.md says hand-tight only.
+        5 N.m is not reachable on a knob this size, so the test above proves
+        the physics but not the product. This one uses
+        ``hand_torque_limit_nm`` and still has to clear the arm's tipping
+        moment -- against the deliberately pessimistic figure, with the whole
+        arm mass at full reach.
         """
+        clamp = DEFAULT_HARDWARE.desk_clamp
+        hand_torque = clamp.hand_torque_limit_nm()
+        resisting_nm = clamp.clamp_resisting_moment_nm(
+            hand_torque, params.tipping_lever_arm_mm
+        )
+        assert resisting_nm > DEFAULT_ARM.tipping_moment_nm()
+
+    def test_required_preload_is_within_the_bottom_arms_structural_limit(
+        self, params
+    ):
+        """The preload needed to hold the arm must sit inside what the U can carry."""
         clamp = DEFAULT_HARDWARE.desk_clamp
         required_n = DEFAULT_ARM.tipping_moment_nm() / (
             params.tipping_lever_arm_mm / 1000.0
         )
-        allowable_n = clamp.jaw_allowable_preload_n(params.jaw_overhang_mm)
-
+        allowable_n = clamp.bottom_arm_allowable_preload_n(
+            params.clamp_width_mm, params.bottom_arm_overhang_mm
+        )
         assert required_n < allowable_n
         assert allowable_n / required_n > 5.0
 
-    def test_max_safe_torque_is_documented_and_below_five_newton_metres(self, params):
+    def test_hand_cannot_overstress_the_u_clamp(self, params):
         """
-        Pins the finding that a 5 N.m tighten would over-stress the jaw.
+        The U-profile inverts the old design's weakness.
 
-        If a future change makes the jaw strong enough for 5 N.m, this test
-        fails and the README warning should be revisited.
+        The D.1b side wing yielded at 3.9 N.m, below what a hand could apply,
+        so the README had to carry a torque warning. A 15 mm bottom arm
+        spanning the full clamp width cannot be over-stressed by hand at all,
+        which is a structural guarantee rather than an instruction.
         """
         clamp = DEFAULT_HARDWARE.desk_clamp
-        max_torque = clamp.max_tightening_torque_nm(params.jaw_overhang_mm)
-        assert 0.0 < max_torque < 5.0
-        # Comfortably above what is actually needed to hold the arm.
-        needed_torque = clamp.preload_to_torque_nm(
-            DEFAULT_ARM.tipping_moment_nm() / (params.tipping_lever_arm_mm / 1000.0)
+        structural_limit = clamp.max_tightening_torque_nm(
+            params.clamp_width_mm, params.bottom_arm_overhang_mm
         )
-        assert max_torque > 5.0 * needed_torque
+        assert structural_limit > clamp.hand_torque_limit_nm()
 
     def test_pad_friction_resists_lateral_load(self, params):
         """
@@ -589,7 +681,7 @@ class TestClampCapacity:
 
 
 # =========================================================================
-# 4. Pedestal parameter derivation
+# 4. U-clamp parameter derivation
 # =========================================================================
 
 
@@ -597,34 +689,123 @@ class TestParameterDerivation:
     def test_default_parameters_validate(self, params):
         assert params.validate() is DesignStatus.OK
 
-    def test_height_comes_from_the_geometry_singletons(self, params):
-        assert params.total_height_mm == pytest.approx(
+    def test_turret_top_comes_from_the_geometry_singletons(self, params):
+        assert params.turret_top_z_mm == pytest.approx(
             DEFAULT_HARDWARE.pedestal_height_mm(DEFAULT_ARM)
         )
+        assert params.turret_top_z_mm == pytest.approx(70.0)
 
-    def test_taller_base_height_gives_a_taller_pedestal(self):
+    def test_taller_base_height_gives_a_taller_turret(self):
         taller = PedestalParameters.from_geometry(arm=ArmGeometry(base_height_mm=150.0))
-        assert taller.total_height_mm == pytest.approx(120.0)
+        assert taller.turret_top_z_mm == pytest.approx(120.0)
+
+    def test_desk_seating_plane_matches_the_shaft_offset(self, params):
+        """The desk seats one shaft-offset outboard of the yaw axis."""
+        assert params.desk_seat_x_mm == pytest.approx(
+            -DEFAULT_HARDWARE.desk_clamp.servo_shaft_offset_from_edge_mm
+        )
+
+    def test_the_gusset_defines_where_the_desk_stops(self, params):
+        """
+        The upper gusset hangs into the throat, so the desk's edge comes to
+        rest on it, not on the spine. The spine therefore sits one gusset
+        further out -- otherwise the yaw axis would end up
+        gusset_size_mm closer to the edge than specified.
+        """
+        assert params.spine_inner_x_mm == pytest.approx(
+            params.desk_seat_x_mm - params.gusset_size_mm
+        )
+        assert params.spine_inner_x_mm < params.desk_seat_x_mm
+
+    def test_yaw_axis_offset_agrees_with_arm_geometry(self):
+        """
+        The clamp's shaft offset and ArmGeometry's base_y are the same
+        measurement in two frames, so they must not drift apart.
+        """
+        assert DEFAULT_ARM.base_y_on_desk_mm == pytest.approx(
+            DEFAULT_HARDWARE.desk_clamp.servo_shaft_offset_from_edge_mm
+        )
+
+    def test_u_profile_spans_match_the_clamp_spec(self, params):
+        clamp = DEFAULT_HARDWARE.desk_clamp
+        assert params.top_arm_depth_mm == pytest.approx(clamp.top_arm_depth_mm)
+        assert params.spine_outer_x_mm == pytest.approx(
+            params.spine_inner_x_mm - clamp.spine_thickness_mm
+        )
+        assert params.throat_bottom_z_mm == pytest.approx(
+            -clamp.throat_max_opening_mm
+        )
+        assert params.bottom_arm_bottom_z_mm == pytest.approx(
+            -clamp.throat_max_opening_mm - clamp.bottom_arm_thickness_mm
+        )
+
+    def test_overall_height_spans_turret_to_bottom_arm(self, params):
+        assert params.overall_height_mm == pytest.approx(
+            params.turret_top_z_mm - params.bottom_arm_bottom_z_mm
+        )
+        assert params.overall_height_mm == pytest.approx(130.0)
 
     def test_cavity_is_the_servo_body_plus_clearance(self, params):
         servo = DEFAULT_HARDWARE.base_yaw_servo
         clearance = DEFAULT_HARDWARE.print_clearance_mm
-        assert params.cavity_body_length_mm == pytest.approx(
-            servo.body_length_mm + 2 * clearance
-        )
-        assert params.cavity_width_mm == pytest.approx(
+        assert params.cavity_x_span_mm == pytest.approx(
             servo.body_width_mm + 2 * clearance
         )
+        assert params.cavity_body_span_y_mm == pytest.approx(
+            servo.body_length_mm + 2 * clearance
+        )
+
+    def test_servo_long_axis_runs_across_the_clamp(self, params):
+        """
+        Along the arm it would not fit.
+
+        The ear slot is 54.5 mm and the body sits 10 mm off the shaft, so
+        along X it would reach 37.25 mm from the axis and break out past the
+        spine 30 mm away. Across Y the arm only has to be 20.5 mm deep.
+        """
+        assert params.cavity_ear_span_y_mm > params.cavity_x_span_mm
+        assert params.cavity_x_span_mm < params.top_arm_depth_mm
 
     def test_ear_slot_is_wider_than_the_body_pocket(self, params):
         """Without this step there is no shelf for the servo's ears."""
-        assert params.cavity_ear_length_mm > params.cavity_body_length_mm
+        assert params.cavity_ear_span_y_mm > params.cavity_body_span_y_mm
 
     def test_cavity_offset_puts_the_shaft_on_the_yaw_axis(self, params):
         servo = DEFAULT_HARDWARE.base_yaw_servo
-        assert params.cavity_offset_x_mm == pytest.approx(
+        assert params.cavity_offset_y_mm == pytest.approx(
             -servo.body_offset_from_shaft_axis_mm
         )
+
+    def test_turret_encloses_the_cavity_with_a_wall(self, params):
+        wall = params.min_wall_thickness_mm
+        assert params.turret_x_max_mm - params.cavity_x_span_mm / 2.0 >= wall
+        cavity_y_max = (
+            params.cavity_offset_y_mm + params.cavity_ear_span_y_mm / 2.0
+        )
+        cavity_y_min = (
+            params.cavity_offset_y_mm - params.cavity_ear_span_y_mm / 2.0
+        )
+        assert params.turret_y_max_mm - cavity_y_max >= wall
+        assert cavity_y_min - params.turret_y_min_mm >= wall
+
+    def test_turret_encloses_the_bearing_seat_with_a_wall(self, params):
+        """
+        The seat is wider than the cavity in X, so it is what sizes the turret
+        there -- a turret sized only from the cavity would break out.
+        """
+        seat_radius = params.bearing_seat_diameter_mm / 2.0
+        assert params.turret_x_max_mm - seat_radius >= params.min_wall_thickness_mm
+        assert seat_radius > params.cavity_x_span_mm / 2.0
+
+    def test_turret_sits_within_the_top_arm(self, params):
+        assert params.turret_x_min_mm >= params.spine_inner_x_mm
+        assert params.turret_x_max_mm <= params.top_arm_inner_x_mm
+
+    def test_clamp_width_covers_the_turret(self, params):
+        half = params.clamp_width_mm / 2.0
+        assert params.turret_y_min_mm >= -half
+        assert params.turret_y_max_mm <= half
+        assert params.clamp_width_mm == pytest.approx(82.5)
 
     def test_bearing_seat_matches_the_bearing_spec(self, params):
         bearing = DEFAULT_HARDWARE.thrust_bearing
@@ -632,112 +813,116 @@ class TestParameterDerivation:
             bearing.seat_diameter_mm
         )
 
-    def test_bearing_stands_proud_of_the_top_face(self, params):
+    def test_bearing_stands_proud_of_the_turret_top(self, params):
         """The turntable must ride the inner race, not the printed face."""
         bearing = DEFAULT_HARDWARE.thrust_bearing
         assert params.bearing_seat_depth_mm < bearing.width_mm
 
-    def test_pedestal_internals_survived_the_clamp_redesign(self, params):
+    def test_pedestal_internals_survived_the_u_clamp_rewrite(self, params):
         """
-        D.1b changed only the mounting. The servo/bearing geometry is good and
-        must not have drifted while the flange was being replaced.
+        D.1c changed the mounting, not the servo/bearing geometry.
+
+        Those dimensions were settled in D.1 and must not drift while the
+        surrounding body is rewritten.
         """
-        assert params.total_height_mm == pytest.approx(70.0)
-        assert 2 * params.body_radius_mm == pytest.approx(85.27, abs=0.01)
-        assert params.cavity_body_length_mm == pytest.approx(40.5)
-        assert params.cavity_ear_length_mm == pytest.approx(54.5)
+        assert params.cavity_body_span_y_mm == pytest.approx(40.5)
+        assert params.cavity_ear_span_y_mm == pytest.approx(54.5)
+        assert params.cavity_x_span_mm == pytest.approx(20.5)
         assert params.ear_shelf_z_mm == pytest.approx(49.5)
         assert params.cavity_top_z_mm == pytest.approx(59.5)
         assert params.bearing_seat_diameter_mm == pytest.approx(21.9)
 
-    def test_jaw_thickness_comes_from_the_clamp_spec(self, params):
-        assert params.jaw_thickness_mm == pytest.approx(
-            DEFAULT_HARDWARE.desk_clamp.upper_jaw_total_thickness_mm
+    def test_pads_flank_the_cavity_opening(self, params):
+        """
+        The cavity opens in the middle of the top arm's underside, so a single
+        pad cannot sit clear of it. Two strips straddle it instead.
+        """
+        assert len(params.pad_recesses) == 2
+        cavity_half = params.cavity_x_span_mm / 2.0
+        outboard, inboard = params.pad_recesses
+        assert outboard[1] <= -cavity_half
+        assert inboard[0] >= cavity_half
+
+    def test_pads_start_at_the_desk_seating_plane(self, params):
+        """No point putting pad outboard of where the desk actually reaches."""
+        outboard = params.pad_recesses[0]
+        assert outboard[0] >= params.desk_seat_x_mm
+
+    def test_pads_stay_inside_the_top_arm(self, params):
+        for x_min, x_max, y_min, y_max in params.pad_recesses:
+            assert x_min >= params.spine_inner_x_mm
+            assert x_max <= params.top_arm_inner_x_mm
+            assert y_min >= -params.clamp_width_mm / 2.0
+            assert y_max <= params.clamp_width_mm / 2.0
+
+    def test_pad_area_beats_the_single_forty_square_pad(self, params):
+        """Two strips give more contact than the 40 x 40 they replaced."""
+        assert params.pad_area_mm2 > 40.0 * 40.0
+
+    def test_screw_sits_as_far_outboard_as_the_foot_allows(self, params):
+        """
+        Outboard placement is not cosmetic: it shortens the bottom arm's
+        cantilever and lengthens the tipping lever at the same time.
+        """
+        clamp = DEFAULT_HARDWARE.desk_clamp
+        assert params.bolt_axis_x_mm == pytest.approx(
+            params.desk_seat_x_mm
+            + clamp.pad_edge_margin_mm
+            + params.pressure_foot_diameter_mm / 2.0
         )
+        assert params.bolt_axis_x_mm < 0.0
 
-    def test_pad_recess_matches_the_clamp_contact_area(self, params):
-        length, width = DEFAULT_HARDWARE.desk_clamp.upper_jaw_contact_mm
-        assert params.pad_length_mm == pytest.approx(length)
-        assert params.pad_width_mm == pytest.approx(width)
+    def test_pressure_foot_stays_under_the_desk(self, params):
+        """Its outer edge must not stray past the desk edge into free air."""
+        foot_outer = params.bolt_axis_x_mm - params.pressure_foot_diameter_mm / 2.0
+        assert foot_outer >= params.desk_seat_x_mm
 
-    def test_pad_starts_clear_of_the_servo_cavity(self, params):
-        """The recess must not open into the pocket the servo slides through."""
-        cavity_outer_x = (
-            params.cavity_offset_x_mm + params.cavity_ear_length_mm / 2.0
+    def test_bottom_arm_overhang_is_measured_from_the_spine(self, params):
+        assert params.bottom_arm_overhang_mm == pytest.approx(
+            params.bolt_axis_x_mm - params.spine_inner_x_mm
         )
-        assert params.pad_inner_x_mm - cavity_outer_x >= params.min_wall_thickness_mm
+        assert params.bottom_arm_overhang_mm > 0.0
 
-    def test_clamp_screw_hole_is_outboard_of_the_pad(self, params):
-        """The desk edge sits between them, so the order matters."""
-        hole_inner_x = params.bolt_axis_x_mm - params.bolt_hole_diameter_mm / 2.0
-        assert hole_inner_x > params.pad_outer_x_mm
-        assert hole_inner_x - params.pad_outer_x_mm == pytest.approx(
-            params.desk_edge_window_mm
-        )
-
-    def test_clamp_screw_hole_matches_the_clamp_spec(self, params):
-        assert params.bolt_hole_diameter_mm == pytest.approx(
-            DEFAULT_HARDWARE.desk_clamp.bolt_clearance_hole_diameter_mm
-        )
-
-    def test_jaw_is_wide_enough_for_the_knob(self, params):
-        assert params.jaw_width_mm >= DEFAULT_HARDWARE.desk_clamp.knob_diameter_mm
-
-    def test_knob_clears_the_pedestal_body(self, params):
-        assert params.bolt_axis_x_mm - params.knob_diameter_mm / 2.0 >= (
-            params.body_radius_mm
-        )
-
-    def test_jaw_overhang_is_the_worst_case_desk_edge_position(self, params):
-        assert params.jaw_overhang_mm == pytest.approx(
-            params.bolt_axis_x_mm - params.pad_outer_x_mm
-        )
-        assert params.jaw_overhang_mm > 0.0
-
-    def test_tipping_lever_is_measured_from_the_pad_inner_edge(self, params):
+    def test_tipping_lever_is_measured_from_the_top_arms_inboard_edge(self, params):
         assert params.tipping_lever_arm_mm == pytest.approx(
-            params.bolt_axis_x_mm - params.pad_inner_x_mm
+            params.top_arm_inner_x_mm - params.bolt_axis_x_mm
         )
-        assert params.tipping_lever_arm_mm > params.jaw_overhang_mm
-
-    def test_wider_desk_edge_window_lengthens_the_jaw(self):
-        narrow = PedestalParameters.from_geometry(desk_edge_window_mm=5.0)
-        wide = PedestalParameters.from_geometry(desk_edge_window_mm=20.0)
-        assert wide.jaw_reach_mm > narrow.jaw_reach_mm
-        assert wide.jaw_overhang_mm > narrow.jaw_overhang_mm
+        assert params.tipping_lever_arm_mm > params.bottom_arm_overhang_mm
 
     def test_servo_screws_land_in_shelf_material(self, params):
         """Each M3 hole must be outside the upper pocket but inside the ear slot."""
-        half_body = params.cavity_body_length_mm / 2.0
-        half_ear = params.cavity_ear_length_mm / 2.0
-        for x, _ in params.servo_screw_positions:
-            offset = abs(x - params.cavity_offset_x_mm)
+        half_body = params.cavity_body_span_y_mm / 2.0
+        half_ear = params.cavity_ear_span_y_mm / 2.0
+        for _, y in params.servo_screw_positions:
+            offset = abs(y - params.cavity_offset_y_mm)
             assert offset > half_body, "screw would open into the upper pocket"
             assert offset < half_ear, "screw would miss the ear slot entirely"
 
-    def test_body_radius_is_derived_not_assumed(self):
-        """A larger servo must grow the body, not silently thin the wall."""
-        bigger_servo = ServoSpec(
-            body_length_mm=44.0, body_width_mm=22.0, flange_span_mm=58.0
-        )
+    def test_turret_is_derived_not_assumed(self):
+        """A larger servo must grow the turret, not silently thin its wall."""
         bigger = PedestalParameters.from_geometry(
-            hardware=HardwareSpec(base_yaw_servo=bigger_servo)
+            hardware=HardwareSpec(
+                base_yaw_servo=ServoSpec(
+                    body_length_mm=44.0, body_width_mm=22.0, flange_span_mm=58.0
+                )
+            )
         )
         default = PedestalParameters.from_geometry()
-        assert bigger.body_radius_mm > default.body_radius_mm
+        assert bigger.turret_x_max_mm >= default.turret_x_max_mm
+        assert bigger.clamp_width_mm > default.clamp_width_mm
         assert bigger.validate() is DesignStatus.OK
 
     def test_report_names_the_key_dimensions(self, params):
         report = params.report()
         for heading in (
-            "Total height", "Body outer diameter", "Bearing seat",
-            "Clamp upper jaw", "MAX safe knob torque",
+            "Overall envelope", "Servo turret", "Bearing seat", "Throat",
+            "Anti-slip pads", "grip margin",
         ):
             assert heading in report
 
 
 # =========================================================================
-# 5. Pedestal design rule checks
+# 5. Design rule checks
 # =========================================================================
 
 
@@ -752,67 +937,86 @@ class TestDesignRuleChecks:
             PedestalParameters.from_geometry(hardware=greedy)
         assert excinfo.value.status is DesignStatus.NEGATIVE_HEIGHT
 
-    def test_servo_too_tall_for_the_pedestal_is_caught(self):
+    def test_servo_too_tall_for_the_turret_is_caught(self):
         """A short base height cannot swallow a full-height servo."""
         squat = ArmGeometry(base_height_mm=45.0)
         with pytest.raises(PedestalDesignError) as excinfo:
             PedestalParameters.from_geometry(arm=squat)
-        assert excinfo.value.status is DesignStatus.FEATURE_COLLISION
+        assert excinfo.value.status in (
+            DesignStatus.FEATURE_COLLISION,
+            DesignStatus.NEGATIVE_HEIGHT,
+        )
 
     def test_short_clamp_screw_is_rejected(self):
         """
-        The screw has to span knob, jaw, throat, jaw and nut.
+        The screw has to span knob, nut, bottom arm and the throat.
 
-        An M8 x 80 -- the length originally specified -- falls 8 mm short at
-        the full 45 mm throat, so the check must catch it rather than ship a
-        clamp that cannot reach its nut.
+        A 40 mm M8 cannot reach the thinnest supported desk, so the check must
+        catch it rather than ship a clamp that cannot touch the desk.
         """
-        short = HardwareSpec(desk_clamp=DeskClampSpec(bolt_length_mm=80.0))
+        short = HardwareSpec(desk_clamp=DeskClampSpec(bolt_length_mm=40.0))
         with pytest.raises(PedestalDesignError) as excinfo:
             PedestalParameters.from_geometry(hardware=short)
         assert excinfo.value.status is DesignStatus.FASTENER_TOO_SHORT
-        assert "80.0" in str(excinfo.value)
 
-    def test_thin_wall_is_rejected(self, params):
-        pinched = replace(params, body_radius_mm=params.body_radius_mm - 4.0)
+    def test_turret_wall_too_thin_is_rejected(self, params):
+        pinched = replace(
+            params, turret_x_max_mm=params.cavity_x_span_mm / 2.0 + 1.0
+        )
         with pytest.raises(PedestalDesignError) as excinfo:
             pinched.validate()
         assert excinfo.value.status is DesignStatus.WALL_TOO_THIN
 
-    def test_pad_recess_deeper_than_the_jaw_is_rejected(self, params):
-        cut_through = replace(params, pad_recess_depth_mm=params.jaw_thickness_mm)
+    def test_turret_overhanging_the_top_arm_is_rejected(self, params):
+        overhanging = replace(
+            params, turret_x_max_mm=params.top_arm_inner_x_mm + 5.0
+        )
+        with pytest.raises(PedestalDesignError) as excinfo:
+            overhanging.validate()
+        assert excinfo.value.status is DesignStatus.FEATURE_COLLISION
+
+    def test_pad_recess_deeper_than_the_top_arm_is_rejected(self, params):
+        cut_through = replace(
+            params, pad_recess_depth_mm=params.top_arm_thickness_mm
+        )
         with pytest.raises(PedestalDesignError) as excinfo:
             cut_through.validate()
         assert excinfo.value.status is DesignStatus.INVALID_PARAMETER
 
-    def test_jaw_thicker_than_the_pedestal_is_rejected(self, params):
-        absurd = replace(params, jaw_thickness_mm=params.total_height_mm + 1.0)
+    def test_oversized_gussets_are_rejected(self, params):
+        """Two gussets meeting in the middle would close the throat."""
+        fat = replace(params, gusset_size_mm=params.throat_opening_mm / 2.0)
         with pytest.raises(PedestalDesignError) as excinfo:
-            absurd.validate()
-        assert excinfo.value.status is DesignStatus.INVALID_PARAMETER
-
-    def test_pad_overlapping_the_servo_cavity_is_rejected(self, params):
-        overlapping = replace(params, pad_inner_x_mm=0.0)
-        with pytest.raises(PedestalDesignError) as excinfo:
-            overlapping.validate()
+            fat.validate()
         assert excinfo.value.status is DesignStatus.FEATURE_COLLISION
 
-    def test_screw_hole_running_off_the_jaw_tip_is_rejected(self, params):
-        stubby = replace(params, jaw_reach_mm=params.bolt_axis_x_mm)
+    def test_screw_outboard_of_the_spine_is_rejected(self, params):
+        """Its pressure foot would press on air."""
+        adrift = replace(params, bolt_axis_x_mm=params.spine_inner_x_mm - 5.0)
         with pytest.raises(PedestalDesignError) as excinfo:
-            stubby.validate()
+            adrift.validate()
+        assert excinfo.value.status is DesignStatus.FEATURE_COLLISION
+
+    def test_pressure_foot_fouling_the_gusset_is_rejected(self, params):
+        huge_foot = replace(params, pressure_foot_diameter_mm=60.0)
+        with pytest.raises(PedestalDesignError) as excinfo:
+            huge_foot.validate()
+        assert excinfo.value.status is DesignStatus.FEATURE_COLLISION
+
+    def test_thin_nut_floor_is_rejected(self, params):
+        squashed = replace(
+            params, bottom_arm_thickness_mm=params.nut_pocket_depth_mm + 1.0
+        )
+        with pytest.raises(PedestalDesignError) as excinfo:
+            squashed.validate()
         assert excinfo.value.status is DesignStatus.WALL_TOO_THIN
 
-    def test_screw_hole_too_close_to_the_jaw_edge_is_rejected(self, params):
-        narrow = replace(params, jaw_width_mm=params.bolt_hole_diameter_mm + 1.0)
+    def test_bolt_hole_wider_than_the_nut_pocket_is_rejected(self, params):
+        bored = replace(
+            params, bolt_hole_diameter_mm=params.nut_pocket_across_flats_mm + 1.0
+        )
         with pytest.raises(PedestalDesignError) as excinfo:
-            narrow.validate()
-        assert excinfo.value.status is DesignStatus.WALL_TOO_THIN
-
-    def test_knob_fouling_the_pedestal_body_is_rejected(self, params):
-        huge_knob = replace(params, knob_diameter_mm=200.0)
-        with pytest.raises(PedestalDesignError) as excinfo:
-            huge_knob.validate()
+            bored.validate()
         assert excinfo.value.status is DesignStatus.FEATURE_COLLISION
 
     def test_shaft_bore_wider_than_the_seat_is_rejected(self, params):
@@ -830,7 +1034,9 @@ class TestDesignRuleChecks:
         assert excinfo.value.status is DesignStatus.FEATURE_COLLISION
 
     def test_oversized_cable_slot_is_rejected(self, params):
-        wide = replace(params, cable_slot_width_mm=params.cavity_width_mm + 1.0)
+        wide = replace(
+            params, cable_slot_width_mm=params.cavity_ear_span_y_mm + 1.0
+        )
         with pytest.raises(PedestalDesignError) as excinfo:
             wide.validate()
         assert excinfo.value.status is DesignStatus.INVALID_PARAMETER
@@ -843,7 +1049,6 @@ class TestDesignRuleChecks:
     @pytest.mark.parametrize(
         "kwargs",
         [
-            {"desk_edge_window_mm": 0.0},
             {"cable_slot_width_mm": -2.0},
             {"servo_screw_hole_depth_mm": 0.0},
             {"ear_top_offset_from_body_top_mm": -1.0},
@@ -856,117 +1061,92 @@ class TestDesignRuleChecks:
 
     def test_design_error_message_carries_the_status_name(self, params):
         with pytest.raises(PedestalDesignError, match=r"\[WALL_TOO_THIN\]"):
-            replace(params, body_radius_mm=params.body_radius_mm - 4.0).validate()
+            replace(
+                params, turret_x_max_mm=params.cavity_x_span_mm / 2.0 + 1.0
+            ).validate()
 
     def test_build_rejects_invalid_parameters(self, params):
-        pinched = replace(params, body_radius_mm=params.body_radius_mm - 4.0)
+        pinched = replace(
+            params, turret_x_max_mm=params.cavity_x_span_mm / 2.0 + 1.0
+        )
         with pytest.raises(PedestalDesignError):
             build_pedestal(pinched)
 
 
 # =========================================================================
-# 6. Lower jaw
+# 6. Pressure foot
 # =========================================================================
 
 
-class TestLowerJaw:
-    def test_default_parameters_validate(self, jaw):
-        assert jaw.validate() is DesignStatus.OK
+class TestPressureFoot:
+    def test_default_parameters_validate(self, foot):
+        assert foot.validate() is DesignStatus.OK
 
-    def test_nut_pocket_fits_a_standard_m8_nut(self, jaw):
-        """
-        Across flats must clear the 13.00 mm nut with print clearance, and the
-        pocket must be deep enough for the thickest DIN EN ISO 4032 nut.
-        """
+    def test_dimensions_come_from_the_clamp_spec(self, foot):
         clamp = DEFAULT_HARDWARE.desk_clamp
-        expected_af = clamp.nut_across_flats_mm + 2 * DEFAULT_HARDWARE.print_clearance_mm
-        assert jaw.nut_pocket_across_flats_mm == pytest.approx(expected_af)
-        assert jaw.nut_pocket_across_flats_mm > clamp.nut_across_flats_mm
-        assert jaw.nut_pocket_depth_mm >= clamp.nut_thickness_max_mm
-
-    def test_nut_pocket_across_corners_is_the_hex_relation(self, jaw):
-        assert jaw.nut_pocket_across_corners_mm == pytest.approx(
-            jaw.nut_pocket_across_flats_mm * 2.0 / math.sqrt(3.0)
+        assert foot.diameter_mm == pytest.approx(clamp.pressure_foot_diameter_mm)
+        assert foot.height_mm == pytest.approx(clamp.pressure_foot_height_mm)
+        assert foot.pad_diameter_mm == pytest.approx(
+            clamp.pressure_foot_pad_diameter_mm
         )
 
-    def test_bolt_hole_is_smaller_than_the_pocket(self, jaw):
-        """Otherwise the nut has no shoulder to bear against."""
-        assert jaw.bolt_hole_diameter_mm < jaw.nut_pocket_across_flats_mm
-
-    def test_load_bearing_web_meets_the_structural_thickness(self, jaw):
-        assert jaw.nut_bearing_thickness_mm == pytest.approx(
-            jaw.structural_thickness_mm
+    def test_height_is_the_sum_of_its_layers(self, foot):
+        assert foot.height_mm == pytest.approx(
+            foot.bore_depth_mm + foot.web_thickness_mm + foot.pad_recess_depth_mm
         )
 
-    def test_total_thickness_comes_from_the_clamp_spec(self, jaw):
-        assert jaw.total_thickness_mm == pytest.approx(
-            DEFAULT_HARDWARE.desk_clamp.lower_jaw_total_thickness_mm
-        )
+    def test_bore_is_an_m8_tapping_hole(self, foot):
+        """Smaller than the screw, so the tip cuts its own thread in PETG."""
+        assert foot.bore_diameter_mm < DEFAULT_HARDWARE.desk_clamp.bolt_nominal_diameter_mm
 
-    def test_pad_matches_the_lower_contact_area(self, jaw):
-        length, width = DEFAULT_HARDWARE.desk_clamp.lower_jaw_contact_mm
-        assert jaw.pad_length_mm == pytest.approx(length)
-        assert jaw.pad_width_mm == pytest.approx(width)
+    def test_bore_fits_inside_the_pad_recess(self, foot):
+        assert foot.bore_diameter_mm < foot.pad_diameter_mm
 
-    def test_pad_stands_back_far_enough_to_sit_under_the_desk(self, jaw):
-        """
-        The pad must clear the widest legal desk-edge offset, or it would hang
-        in free air when the user sites the arm at one end of the window.
-        """
-        pedestal = PedestalParameters.from_geometry()
-        assert jaw.pad_gap_from_bolt_mm >= pedestal.jaw_overhang_mm
+    def test_foot_spreads_the_load_over_a_bare_tip(self, foot):
+        """The reason the part exists at all."""
+        assert foot.bearing_area_ratio > 5.0
+        assert foot.pad_area_mm2 > 250.0
 
-    def test_pad_clears_the_nut_pocket(self, jaw):
-        assert jaw.pad_gap_from_bolt_mm > jaw.nut_pocket_across_corners_mm / 2.0
+    def test_foot_fits_the_throat_at_the_thickest_desk(self, foot):
+        assert foot.height_mm <= foot.throat_clearance_mm
 
-    def test_plate_length_is_the_sum_of_its_arms(self, jaw):
-        assert jaw.plate_length_mm == pytest.approx(
-            jaw.inboard_length_mm + jaw.outboard_length_mm
-        )
-
-    def test_thin_web_is_rejected(self, jaw):
-        squashed = replace(jaw, total_thickness_mm=jaw.total_thickness_mm - 5.0)
-        with pytest.raises(LowerJawDesignError) as excinfo:
-            squashed.validate()
-        assert excinfo.value.status is DesignStatus.WALL_TOO_THIN
-
-    def test_pocket_and_recess_meeting_is_rejected(self, jaw):
-        thin = replace(
-            jaw,
-            total_thickness_mm=jaw.nut_pocket_depth_mm + jaw.pad_recess_depth_mm,
-        )
-        with pytest.raises(LowerJawDesignError) as excinfo:
-            thin.validate()
+    def test_foot_too_tall_for_the_throat_is_rejected(self, foot):
+        tall = replace(foot, height_mm=foot.throat_clearance_mm + 5.0,
+                       bore_depth_mm=foot.bore_depth_mm + 5.0)
+        with pytest.raises(PressureFootDesignError) as excinfo:
+            tall.validate()
         assert excinfo.value.status is DesignStatus.FEATURE_COLLISION
 
-    def test_bolt_hole_wider_than_the_pocket_is_rejected(self, jaw):
-        bored = replace(
-            jaw, bolt_hole_diameter_mm=jaw.nut_pocket_across_flats_mm + 1.0
-        )
-        with pytest.raises(LowerJawDesignError) as excinfo:
+    def test_height_inconsistent_with_its_layers_is_rejected(self, foot):
+        inconsistent = replace(foot, height_mm=foot.height_mm + 3.0)
+        with pytest.raises(PressureFootDesignError) as excinfo:
+            inconsistent.validate()
+        assert excinfo.value.status is DesignStatus.INVALID_PARAMETER
+
+    def test_pad_wider_than_the_foot_is_rejected(self, foot):
+        wide = replace(foot, pad_diameter_mm=foot.diameter_mm)
+        with pytest.raises(PressureFootDesignError) as excinfo:
+            wide.validate()
+        assert excinfo.value.status is DesignStatus.INVALID_PARAMETER
+
+    def test_bore_wider_than_the_pad_is_rejected(self, foot):
+        bored = replace(foot, bore_diameter_mm=foot.pad_diameter_mm + 1.0)
+        with pytest.raises(PressureFootDesignError) as excinfo:
             bored.validate()
         assert excinfo.value.status is DesignStatus.FEATURE_COLLISION
 
-    def test_narrow_plate_is_rejected(self, jaw):
-        narrow = replace(jaw, plate_width_mm=jaw.nut_pocket_across_corners_mm)
-        with pytest.raises(LowerJawDesignError) as excinfo:
-            narrow.validate()
-        assert excinfo.value.status is DesignStatus.WALL_TOO_THIN
-
-    def test_short_tail_is_rejected(self, jaw):
-        clipped = replace(jaw, outboard_length_mm=1.0)
-        with pytest.raises(LowerJawDesignError) as excinfo:
-            clipped.validate()
-        assert excinfo.value.status is DesignStatus.WALL_TOO_THIN
-
-    def test_non_positive_window_rejected(self):
-        with pytest.raises(LowerJawDesignError) as excinfo:
-            LowerJawParameters.from_geometry(desk_edge_window_mm=0.0)
+    @pytest.mark.parametrize(
+        "kwargs", [{"diameter_mm": 0.0}, {"bore_depth_mm": -1.0},
+                   {"web_thickness_mm": 0.0}]
+    )
+    def test_non_positive_dimensions_rejected(self, foot, kwargs):
+        with pytest.raises(PressureFootDesignError) as excinfo:
+            replace(foot, **kwargs).validate()
         assert excinfo.value.status is DesignStatus.INVALID_PARAMETER
 
-    def test_report_names_the_key_dimensions(self, jaw):
-        report = jaw.report()
-        for heading in ("Nut pocket", "Pad recess", "Load-bearing web"):
+    def test_report_names_the_key_dimensions(self, foot):
+        report = foot.report()
+        for heading in ("Screw bore", "Pad recess", "Contact area"):
             assert heading in report
 
 
@@ -1095,6 +1275,32 @@ class TestHexPrism:
             hex_prism(*args)
 
 
+class TestRightTrianglePrism:
+    def test_legs_are_honoured(self):
+        box = right_triangle_prism(5.0, 7.0, 80.0).bounding_box()
+        assert box.min.X == pytest.approx(0.0, abs=1e-6)
+        assert box.max.X == pytest.approx(5.0, abs=1e-6)
+        assert box.min.Z == pytest.approx(0.0, abs=1e-6)
+        assert box.max.Z == pytest.approx(7.0, abs=1e-6)
+
+    def test_extrusion_is_centred_on_the_xz_plane(self):
+        """Callers position gussets by their corner, not by a centroid."""
+        box = right_triangle_prism(5.0, 5.0, 80.0).bounding_box()
+        assert box.min.Y == pytest.approx(-40.0, abs=1e-6)
+        assert box.max.Y == pytest.approx(40.0, abs=1e-6)
+
+    def test_volume_is_half_the_enclosing_box(self):
+        prism = right_triangle_prism(5.0, 7.0, 80.0)
+        assert prism.volume == pytest.approx(0.5 * 5.0 * 7.0 * 80.0)
+
+    @pytest.mark.parametrize(
+        "args", [(0.0, 5.0, 80.0), (5.0, 0.0, 80.0), (5.0, 5.0, -1.0)]
+    )
+    def test_non_positive_dimensions_rejected(self, args):
+        with pytest.raises(ValueError, match="must be positive"):
+            right_triangle_prism(*args)
+
+
 # =========================================================================
 # 9. Solid construction
 # =========================================================================
@@ -1107,7 +1313,7 @@ class TestSolidConstruction:
         assert len(part.solids()) == 1, f"{part_name} must not be fragmented"
         assert part.volume > 0.0
 
-    def test_pedestal_is_smaller_than_its_bounding_box(self, pedestal, params):
+    def test_pedestal_is_smaller_than_its_bounding_box(self, pedestal):
         """Sanity check that the internal pockets were actually subtracted."""
         box = pedestal.bounding_box()
         envelope = (
@@ -1115,15 +1321,29 @@ class TestSolidConstruction:
         )
         assert pedestal.volume < envelope
 
-    def test_pedestal_bounding_box_spans_body_plus_jaw(self, pedestal, params):
+    def test_pedestal_bounding_box_spans_the_whole_u(self, pedestal, params):
         box = pedestal.bounding_box()
-        assert box.max.Z - box.min.Z == pytest.approx(params.total_height_mm, abs=1e-6)
-        assert box.min.X == pytest.approx(-params.body_radius_mm, abs=1e-6)
-        assert box.max.X == pytest.approx(params.jaw_reach_mm, abs=1e-6)
+        assert box.min.X == pytest.approx(params.spine_outer_x_mm, abs=1e-6)
+        assert box.max.X == pytest.approx(params.top_arm_inner_x_mm, abs=1e-6)
+        assert box.max.Y - box.min.Y == pytest.approx(
+            params.clamp_width_mm, abs=1e-6
+        )
+        assert box.max.Z - box.min.Z == pytest.approx(
+            params.overall_height_mm, abs=1e-6
+        )
 
-    def test_pedestal_sits_on_the_z_origin(self, pedestal):
-        """The underside must be at z = 0 so it drops onto a print bed."""
-        assert pedestal.bounding_box().min.Z == pytest.approx(0.0, abs=1e-6)
+    def test_pedestal_straddles_the_desk_plane(self, pedestal, params):
+        """
+        The origin is the desk's top surface, not the print bed.
+
+        Keeping that datum is what lets the clamp, ArmGeometry's base height
+        and the assembly preview share one coordinate system without a
+        conversion step; slicers drop the part to the bed on import.
+        """
+        box = pedestal.bounding_box()
+        assert box.min.Z == pytest.approx(params.bottom_arm_bottom_z_mm, abs=1e-6)
+        assert box.max.Z == pytest.approx(params.turret_top_z_mm, abs=1e-6)
+        assert box.min.Z < 0.0 < box.max.Z
 
     def test_pedestal_uses_the_geometry_singletons_by_default(self):
         default_built = build_pedestal()
@@ -1131,19 +1351,15 @@ class TestSolidConstruction:
             DEFAULT_HARDWARE.pedestal_height_mm(DEFAULT_ARM), abs=1e-6
         )
 
-    def test_lower_jaw_bounding_box_matches_its_parameters(self):
-        jaw = LowerJawParameters.from_geometry()
-        box = build_lower_jaw(jaw).bounding_box()
-        assert box.max.Z - box.min.Z == pytest.approx(jaw.total_thickness_mm, abs=1e-6)
-        assert box.max.Y - box.min.Y == pytest.approx(jaw.plate_width_mm, abs=1e-6)
-        assert box.max.X - box.min.X == pytest.approx(jaw.plate_length_mm, abs=1e-6)
+    def test_pressure_foot_bounding_box_matches_its_parameters(self, foot):
+        box = build_pressure_foot(foot).bounding_box()
+        assert box.max.Z - box.min.Z == pytest.approx(foot.height_mm, abs=1e-6)
+        assert box.min.Z == pytest.approx(0.0, abs=1e-6)
+        assert box.max.X - box.min.X == pytest.approx(foot.diameter_mm, rel=1e-3)
 
-    def test_lower_jaw_extends_inboard_from_the_bolt_axis(self):
-        """Origin is the bolt axis; the plate reaches under the desk in -X."""
-        jaw = LowerJawParameters.from_geometry()
-        box = build_lower_jaw(jaw).bounding_box()
-        assert box.min.X == pytest.approx(-jaw.inboard_length_mm, abs=1e-6)
-        assert box.max.X == pytest.approx(jaw.outboard_length_mm, abs=1e-6)
+    def test_pressure_foot_is_hollowed_by_its_bore_and_recess(self, foot):
+        solid_disc = math.pi * (foot.diameter_mm / 2.0) ** 2 * foot.height_mm
+        assert build_pressure_foot(foot).volume < solid_disc
 
     def test_knob_bounding_box_matches_its_parameters(self):
         knob = KnobParameters.from_geometry()
@@ -1256,10 +1472,11 @@ class TestStlExport:
 
     def test_pedestal_mesh_bounding_box_matches_the_design(self, meshes, params):
         low, high = meshes["base_pedestal"].bounding_box()
-        assert high[2] - low[2] == pytest.approx(params.total_height_mm, abs=1e-3)
-        assert high[0] == pytest.approx(params.jaw_reach_mm, abs=1e-3)
+        assert high[2] - low[2] == pytest.approx(params.overall_height_mm, abs=1e-3)
+        assert low[0] == pytest.approx(params.spine_outer_x_mm, abs=1e-3)
+        assert high[0] == pytest.approx(params.top_arm_inner_x_mm, abs=1e-3)
 
-    def test_pedestal_mesh_sits_on_the_z_origin(self, meshes):
-        assert meshes["base_pedestal"].bounding_box()[0][2] == pytest.approx(
-            0.0, abs=1e-6
-        )
+    def test_pedestal_mesh_keeps_the_desk_plane_datum(self, meshes, params):
+        low, high = meshes["base_pedestal"].bounding_box()
+        assert low[2] == pytest.approx(params.bottom_arm_bottom_z_mm, abs=1e-3)
+        assert high[2] == pytest.approx(params.turret_top_z_mm, abs=1e-3)

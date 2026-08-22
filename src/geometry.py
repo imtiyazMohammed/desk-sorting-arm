@@ -80,10 +80,13 @@ class ArmGeometry:
     desk_width_mm: float = 1200.0
     desk_depth_mm: float = 600.0
     # Base mount position on the desk (center of long edge).
-    # Desk frame origin is one corner; base is placed on the near long edge,
-    # centered along its length, offset "into" the desk by base_inset_mm.
+    # Desk frame origin is one corner; the base sits on the near long edge,
+    # centered along its length. The Y offset is not a free choice: the U-clamp
+    # puts the yaw axis DeskClampSpec.servo_shaft_offset_from_edge_mm inward of
+    # the desk edge, and this is that same measurement in the desk frame. The
+    # two must agree, which tests/test_cad.py asserts.
     base_x_on_desk_mm: float = 600.0
-    base_y_on_desk_mm: float = 0.0
+    base_y_on_desk_mm: float = 30.0
 
     # ---- Joint limits --------------------------------------------------------
     # DS3218 servos physically travel ~270°. We restrict further to avoid
@@ -138,7 +141,17 @@ class ArmGeometry:
     def worst_case_desk_reach_mm(self) -> float:
         """
         Distance from base to the farthest desk corner.
+
         Used to sanity-check that geometry can cover the entire workspace.
+
+        Note that this is compared against two different thresholds elsewhere,
+        and they disagree. :attr:`safe_reach_mm` is 85% of full extension, a
+        conservative round number; docs/PROOF_OF_CONCEPT.md section 2.1 sized
+        the arm against 89%, which is the figure the link lengths were actually
+        chosen for. The far corners land between the two, so
+        :meth:`coverage_report` reports "not reachable" while the arm is in
+        fact within its design envelope. Treat the 85% line as a caution, not
+        a limit.
         """
         corners = np.array(
             [
@@ -447,12 +460,34 @@ class BaseStack:
 @dataclass(frozen=True)
 class DeskClampSpec:
     """
-    G-clamp mount that grips the desk edge, replacing the drilled-flange mount.
+    Monolithic U-clamp that wraps the desk edge, carrying the base yaw joint.
 
-    The arm is clamped rather than bolted so the desk is never drilled and the
-    whole assembly can be repositioned or removed. An upper jaw (part of the
-    pedestal) sits on the desk top, a separate lower jaw goes underneath, and
-    a captive-nut M8 screw driven by a printed knob pulls them together.
+    In side view the part is a C-profile, like a monitor-arm clamp::
+
+                    servo turret
+                   +----------+
+        z=+70      |          |
+                   |          |
+        z=+15  +---+----------+---------+   top arm, lies on the desk
+               |///|                    |
+               |///|   throat (desk)    |   spine hugs the desk edge outside
+               |///|                    |
+        z=-45  +---+----------+---------+   bottom arm, under the desk
+               |///|          |  bolt   |
+        z=-60  +---+----------+---------+
+                        knob below
+
+    The servo cannot live inside the 15 mm top arm -- a DS3218 is 40.5 mm tall
+    and needs 55.5 mm of housing once the bearing seat and ceiling are counted
+    -- so it sits in a turret rising from the arm to the full pedestal height.
+    The arm stays thin, which is what makes the profile a C rather than a slab.
+
+    Clamping is by a single M8 driven **upward** from the bottom arm: the nut
+    is captive in a pocket in that arm's underside, the head and its knob hang
+    below, and the screw's tip carries a printed pressure foot that bears on
+    the desk's underside. Note this is the only arrangement that can actually
+    grip: a screw entering from the top of the bottom arm would press on
+    nothing.
 
     Fastener dimensions are standards, verified rather than assumed:
 
@@ -475,33 +510,56 @@ class DeskClampSpec:
     #: (min, max) desk thickness the clamp is designed to grip, in mm.
     desk_thickness_range_mm: Tuple[float, float] = (15.0, 35.0)
 
-    #: Maximum jaw gap, in mm. Exceeds the thickest supported desk so the
-    #: clamp can be slid on and off without fully unthreading the nut.
+    #: Vertical gap between the arms, in mm. Fixed by the printed geometry --
+    #: unlike a screw-adjusted jaw, a U-clamp's throat cannot open further, so
+    #: this must exceed the thickest supported desk outright.
     throat_max_opening_mm: float = 45.0
 
-    # ---- Jaw contact geometry -----------------------------------------------
-    #: (length, width) of the upper jaw's anti-slip pad area, in mm.
-    upper_jaw_contact_mm: Tuple[float, float] = (50.0, 50.0)
+    # ---- U-profile geometry -------------------------------------------------
+    #: How far the top arm reaches inward over the desk from the edge, in mm.
+    top_arm_depth_mm: float = 60.0
 
-    #: (length, width) of the lower jaw's anti-slip pad area, in mm.
-    lower_jaw_contact_mm: Tuple[float, float] = (40.0, 40.0)
+    #: How far the bottom arm reaches inward under the desk, in mm.
+    bottom_arm_depth_mm: float = 60.0
 
-    #: Structural thickness of each jaw plate, in mm. Recesses and pockets are
-    #: cut IN ADDITION to this, so it is the material that actually carries
-    #: load -- see :attr:`upper_jaw_total_thickness_mm`.
-    jaw_thickness_mm: float = 10.0
+    #: Vertical thickness of the top arm, in mm. This is the plate that lies
+    #: on the desk; the servo housing is a turret above it, not inside it.
+    top_arm_thickness_mm: float = 15.0
 
+    #: Vertical thickness of the bottom arm, in mm. Must swallow the nut
+    #: pocket and still leave a structural floor.
+    bottom_arm_thickness_mm: float = 15.0
+
+    #: Thickness of the vertical spine that hugs the desk edge, in mm.
+    spine_thickness_mm: float = 15.0
+
+    #: Distance from the desk edge inward to the servo shaft -- which is the
+    #: arm's yaw axis. Must match ``ArmGeometry.base_y_on_desk_mm``, since that
+    #: is the same measurement expressed in the desk frame.
+    servo_shaft_offset_from_edge_mm: float = 30.0
+
+    #: Leg size of the triangular gussets at the two inner corners of the U,
+    #: in mm. Gussets rather than fillets: a swept fillet is the most fragile
+    #: operation to re-run when upstream dimensions move, and this package's
+    #: whole premise is that dimensions do move.
+    gusset_size_mm: float = 5.0
+
+    # ---- Anti-slip pads -----------------------------------------------------
     #: Depth of the anti-slip pad recesses, in mm.
     pad_recess_depth_mm: float = 2.0
 
     #: Thickness of the rubber sheet glued into those recesses, in mm.
     pad_thickness_mm: float = 2.0
 
+    #: Gap left between a pad recess and the feature beside it, in mm. Smaller
+    #: than a structural wall: these are surface recesses, not load paths.
+    pad_edge_margin_mm: float = 2.0
+
     # ---- Clamping screw -----------------------------------------------------
     bolt_thread: str = "M8"
     bolt_nominal_diameter_mm: float = 8.0
     bolt_thread_pitch_mm: float = 1.25
-    bolt_length_mm: float = 90.0
+    bolt_length_mm: float = 70.0
     #: ISO 273 medium series clearance hole for M8.
     bolt_clearance_hole_diameter_mm: float = 9.0
     #: DIN 933 / ISO 4017 hex head, across flats (max) and height.
@@ -514,6 +572,21 @@ class DeskClampSpec:
     nut_thickness_nominal_mm: float = 6.50
     #: DIN EN ISO 4032 maximum. The pocket is cut from this.
     nut_thickness_max_mm: float = 6.80
+
+    # ---- Pressure foot ------------------------------------------------------
+    #: Printed puck on the screw's tip. A bare M8 tip at a few hundred newtons
+    #: would bite into the desk underside; the foot spreads that load and
+    #: carries the second anti-slip pad.
+    pressure_foot_diameter_mm: float = 24.0
+    #: Diameter of the pad recess in the foot's upper face, in mm.
+    pressure_foot_pad_diameter_mm: float = 20.0
+    #: Blind bore the screw's tip threads into. Sized as an M8 tapping hole so
+    #: the screw cuts its own thread in PETG; epoxy it if a test print is loose.
+    pressure_foot_bore_diameter_mm: float = 7.0
+    pressure_foot_bore_depth_mm: float = 6.0
+    #: Material between the bore's crown and the pad recess floor, in mm.
+    #: Loaded in pure compression, so it does not need a structural thickness.
+    pressure_foot_web_mm: float = 2.0
 
     # ---- Hand knob ----------------------------------------------------------
     knob_diameter_mm: float = 50.0
@@ -536,7 +609,7 @@ class DeskClampSpec:
     pad_friction_coefficient: float = 0.40
     #: Steel bolt thread in a steel nut, dry.
     thread_friction_coefficient: float = 0.15
-    #: Printed knob boss bearing on the printed upper jaw.
+    #: Printed knob boss bearing on the printed bottom arm.
     collar_friction_coefficient: float = 0.30
 
     def __post_init__(self) -> None:
@@ -550,11 +623,17 @@ class DeskClampSpec:
             raise ValueError(
                 f"DeskClampSpec: throat_max_opening_mm "
                 f"({self.throat_max_opening_mm}) must exceed the thickest "
-                f"supported desk ({high}), or the clamp cannot be slid on."
+                f"supported desk ({high}). A U-clamp's throat is fixed by the "
+                "printed geometry and cannot be opened further."
             )
         for name in (
-            "jaw_thickness_mm", "pad_recess_depth_mm", "pad_thickness_mm",
+            "top_arm_depth_mm", "bottom_arm_depth_mm", "top_arm_thickness_mm",
+            "bottom_arm_thickness_mm", "spine_thickness_mm",
+            "servo_shaft_offset_from_edge_mm", "gusset_size_mm",
+            "pad_recess_depth_mm", "pad_thickness_mm",
             "bolt_nominal_diameter_mm", "bolt_thread_pitch_mm", "bolt_length_mm",
+            "pressure_foot_diameter_mm", "pressure_foot_bore_depth_mm",
+            "pressure_foot_web_mm",
             "knob_diameter_mm", "knob_thickness_mm", "knob_boss_diameter_mm",
         ):
             if getattr(self, name) <= 0.0:
@@ -562,6 +641,13 @@ class DeskClampSpec:
                     f"DeskClampSpec: {name} must be positive, got "
                     f"{getattr(self, name)}."
                 )
+        if self.servo_shaft_offset_from_edge_mm >= self.top_arm_depth_mm:
+            raise ValueError(
+                f"DeskClampSpec: the shaft sits "
+                f"{self.servo_shaft_offset_from_edge_mm} mm inward but the top "
+                f"arm only reaches {self.top_arm_depth_mm} mm, so the yaw axis "
+                "would fall off the end of the arm."
+            )
         if self.pad_thickness_mm > self.pad_recess_depth_mm:
             raise ValueError(
                 f"DeskClampSpec: pad_thickness_mm ({self.pad_thickness_mm}) "
@@ -573,11 +659,29 @@ class DeskClampSpec:
                 "DeskClampSpec: nut_thickness_max_mm must not be less than "
                 "nut_thickness_nominal_mm."
             )
+        if self.nut_pocket_depth_mm >= self.bottom_arm_thickness_mm:
+            raise ValueError(
+                f"DeskClampSpec: the nut pocket "
+                f"({self.nut_pocket_depth_mm} mm) is as deep as the bottom arm "
+                f"({self.bottom_arm_thickness_mm} mm), leaving no floor for the "
+                "nut to bear against."
+            )
         if self.bolt_clearance_hole_diameter_mm <= self.bolt_nominal_diameter_mm:
             raise ValueError(
                 f"DeskClampSpec: bolt clearance hole "
                 f"({self.bolt_clearance_hole_diameter_mm}) must exceed the "
                 f"nominal diameter ({self.bolt_nominal_diameter_mm})."
+            )
+        if self.pressure_foot_pad_diameter_mm >= self.pressure_foot_diameter_mm:
+            raise ValueError(
+                f"DeskClampSpec: the pressure foot's pad recess "
+                f"({self.pressure_foot_pad_diameter_mm}) must be smaller than "
+                f"the foot itself ({self.pressure_foot_diameter_mm})."
+            )
+        if self.pressure_foot_bore_diameter_mm >= self.pressure_foot_pad_diameter_mm:
+            raise ValueError(
+                "DeskClampSpec: the pressure foot's bore must be smaller than "
+                "its pad recess."
             )
         if self.knob_boss_diameter_mm >= self.knob_diameter_mm:
             raise ValueError(
@@ -597,7 +701,7 @@ class DeskClampSpec:
                 f"{self.knob_flute_count}."
             )
 
-    # ---- Derived geometry ---------------------------------------------------
+    # ---- Desk compatibility -------------------------------------------------
 
     @property
     def min_desk_thickness_mm(self) -> float:
@@ -609,8 +713,10 @@ class DeskClampSpec:
 
     @property
     def desk_removal_clearance_mm(self) -> float:
-        """Extra throat beyond the thickest desk, for sliding the clamp on."""
+        """Slack above the thickest desk, for sliding the clamp on and off."""
         return self.throat_max_opening_mm - self.max_desk_thickness_mm
+
+    # ---- Derived geometry ---------------------------------------------------
 
     @property
     def nut_pocket_depth_mm(self) -> float:
@@ -623,24 +729,23 @@ class DeskClampSpec:
         return float(self.nut_across_flats_mm * 2.0 / np.sqrt(3.0))
 
     @property
-    def upper_jaw_total_thickness_mm(self) -> float:
-        """Structural thickness plus the pad recess cut into its underside."""
-        return self.jaw_thickness_mm + self.pad_recess_depth_mm
+    def bottom_arm_floor_mm(self) -> float:
+        """Material between the nut pocket's crown and the arm's top face."""
+        return self.bottom_arm_thickness_mm - self.nut_pocket_depth_mm
 
     @property
-    def lower_jaw_total_thickness_mm(self) -> float:
-        """
-        Structural thickness plus a pad recess on top and a nut pocket below.
-
-        Both recesses are additional to :attr:`jaw_thickness_mm` because at
-        10 mm total the 2 mm pad recess and 6.8 mm nut pocket would leave only
-        1.2 mm between them.
-        """
+    def pressure_foot_height_mm(self) -> float:
+        """Total printed height of the pressure foot, in mm."""
         return (
-            self.jaw_thickness_mm
+            self.pressure_foot_bore_depth_mm
+            + self.pressure_foot_web_mm
             + self.pad_recess_depth_mm
-            + self.nut_pocket_depth_mm
         )
+
+    @property
+    def pressure_foot_rise_above_tip_mm(self) -> float:
+        """How far the foot's contact face stands above the screw's tip."""
+        return self.pressure_foot_web_mm + self.pad_recess_depth_mm
 
     @property
     def knob_socket_depth_mm(self) -> float:
@@ -648,24 +753,35 @@ class DeskClampSpec:
         return self.bolt_head_height_mm + self.knob_head_recess_mm
 
     @property
+    def max_screw_protrusion_mm(self) -> float:
+        """
+        Screw travel above the bottom arm needed for the *thinnest* desk.
+
+        A thin desk sits high in the throat, so its underside is furthest from
+        the bottom arm and the screw has to reach hardest. The pressure foot
+        makes up part of that distance.
+        """
+        return (
+            self.throat_max_opening_mm
+            - self.min_desk_thickness_mm
+            - self.pressure_foot_rise_above_tip_mm
+        )
+
+    @property
     def required_bolt_length_mm(self) -> float:
         """
-        Shortest bolt that reaches the nut at maximum throat opening.
+        Shortest screw that still reaches the thinnest supported desk.
 
-        Stack, from the underside of the bolt head downward: the knob material
-        below the head, the upper jaw, the open throat, the lower jaw above
-        its nut pocket, and full engagement in the nut.
+        Stack, from under the head upward: the knob material below the head,
+        full engagement in the captive nut, the bottom arm above it, and the
+        protrusion into the throat.
         """
         knob_below_head = self.knob_thickness_mm - self.knob_socket_depth_mm
-        lower_jaw_above_pocket = (
-            self.lower_jaw_total_thickness_mm - self.nut_pocket_depth_mm
-        )
         return float(
             knob_below_head
-            + self.upper_jaw_total_thickness_mm
-            + self.throat_max_opening_mm
-            + lower_jaw_above_pocket
             + self.nut_thickness_max_mm
+            + self.bottom_arm_thickness_mm
+            + self.max_screw_protrusion_mm
         )
 
     # ---- Clamping physics ---------------------------------------------------
@@ -728,6 +844,21 @@ class DeskClampSpec:
             raise ValueError(f"preload_n must be non-negative, got {preload_n}.")
         return float(preload_n * self.torque_to_preload_factor_m())
 
+    def hand_torque_limit_nm(self, grip_force_n: float = 40.0) -> float:
+        """
+        Torque a hand can actually apply to this knob, in newton-metres.
+
+        A firm two-finger grip is about 40 N tangential at the rim, so torque
+        scales directly with knob radius. This is the point of choosing a
+        knob size: shrinking it caps the torque physically, rather than
+        relying on the user to read a warning.
+        """
+        if grip_force_n < 0.0:
+            raise ValueError(
+                f"grip_force_n must be non-negative, got {grip_force_n}."
+            )
+        return float(grip_force_n * (self.knob_diameter_mm / 2.0) / 1000.0)
+
     def pad_friction_force_n(self, preload_n: float) -> float:
         """
         Lateral force the pads resist before the clamp slides, in newtons.
@@ -746,10 +877,10 @@ class DeskClampSpec:
         """
         Overturning moment the clamp resists, in newton-metres.
 
-        The arm's tipping moment tries to lift the clamped side. The bolt
-        preload holds it down, acting at ``lever_arm_mm`` from the pivot --
-        taken as the inboard edge of the upper jaw's pad, the last line of
-        contact the assembly would rotate about.
+        The arm's tipping moment tries to lift the clamped assembly off the
+        desk. The screw's preload holds it down, acting at ``lever_arm_mm``
+        from the pivot -- taken as the inboard edge of the top arm's pads, the
+        last line of contact the assembly would rotate about.
 
         Raises
         ------
@@ -762,38 +893,45 @@ class DeskClampSpec:
             )
         return float(self.bolt_preload_n(torque_nm) * (lever_arm_mm / 1000.0))
 
-    def jaw_allowable_preload_n(
+    def bottom_arm_allowable_preload_n(
         self,
+        width_mm: float,
         overhang_mm: float,
         allowable_stress_mpa: float = 25.0,
     ) -> float:
         """
-        Preload the upper jaw can carry before bending failure, in newtons.
+        Preload the bottom arm can carry before bending failure, in newtons.
 
-        The jaw overhangs the desk edge by ``overhang_mm`` with the bolt load
-        at its tip, so it is a cantilever of rectangular section: the section
-        modulus is ``width * thickness^2 / 6`` and the allowable load is
+        The bottom arm cantilevers from the spine with the screw's reaction at
+        ``overhang_mm`` along it, so it is a rectangular-section cantilever:
+        section modulus ``width * thickness^2 / 6``, allowable load
         ``stress * modulus / overhang``.
 
         The 25 MPa default is roughly half of PETG's ~50 MPa tensile yield,
         i.e. a safety factor of 2 against a printed part whose layer adhesion
         is weaker than bulk material.
 
-        This is the real limit on how hard the knob may be tightened, and it
-        is well below what a hand can apply -- see ``cad/README.md``.
+        This is the weakest link in the U, and what sets the maximum safe
+        tightening torque.
         """
+        if width_mm <= 0.0:
+            raise ValueError(f"width_mm must be positive, got {width_mm}.")
         if overhang_mm <= 0.0:
             raise ValueError(f"overhang_mm must be positive, got {overhang_mm}.")
-        width_mm = self.upper_jaw_contact_mm[1]
-        section_modulus_mm3 = width_mm * self.jaw_thickness_mm**2 / 6.0
+        section_modulus_mm3 = width_mm * self.bottom_arm_thickness_mm**2 / 6.0
         return float(allowable_stress_mpa * section_modulus_mm3 / overhang_mm)
 
     def max_tightening_torque_nm(
-        self, overhang_mm: float, allowable_stress_mpa: float = 25.0
+        self,
+        width_mm: float,
+        overhang_mm: float,
+        allowable_stress_mpa: float = 25.0,
     ) -> float:
-        """Hand torque at which the upper jaw reaches its allowable stress."""
+        """Hand torque at which the bottom arm reaches its allowable stress."""
         return self.preload_to_torque_nm(
-            self.jaw_allowable_preload_n(overhang_mm, allowable_stress_mpa)
+            self.bottom_arm_allowable_preload_n(
+                width_mm, overhang_mm, allowable_stress_mpa
+            )
         )
 
 
