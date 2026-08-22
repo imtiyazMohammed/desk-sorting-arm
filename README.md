@@ -8,7 +8,8 @@ https://github.com/user-attachments/assets/2be9d9cc-dfaf-4284-88d5-a9f24a1ce587
 
 [![Tests](https://github.com/imtiyazMohammed/desk-sorting-arm/actions/workflows/tests.yml/badge.svg)](https://github.com/imtiyazMohammed/desk-sorting-arm/actions/workflows/tests.yml)
 
-Simulation-only kinematics stack. No hardware required.
+Kinematics simulation (Phase A) and computer-vision foundation (Phase B).
+No hardware required to run anything in this repository.
 
 **Requires Python 3.10-3.14.** `build123d` (Phase D parametric CAD) declares
 `requires-python ">=3.10,<3.15"`, so the Python 3.9 support present through
@@ -21,7 +22,7 @@ Phase A has been dropped. Raspberry Pi OS Bookworm ships 3.11 and Trixie ships
 # 1. Install dependencies
 python3 -m pip install -r requirements.txt
 
-# 2. Run the test suite (32 tests, ~2 seconds)
+# 2. Run the test suite (103 tests, ~2 seconds)
 python3 -m pytest tests/ -v
 
 # 3. Try the module smoke tests
@@ -29,9 +30,21 @@ python3 -m src.geometry              # geometry summary
 python3 -m src.forward_kinematics    # FK sanity checks
 python3 -m src.inverse_kinematics    # IK sample solves
 python3 -m src.trajectory            # trajectory profiling
+python3 -m src.image_source          # synthetic camera frames
 
-# 4. Read the proof-of-concept document
+# 4. Manual hardware check (needs a webcam; not part of the test suite)
+python3 scripts/preview_camera.py
+python3 scripts/preview_camera.py --synthetic   # works without a camera
+
+# 5. Read the proof-of-concept document
 docs/PROOF_OF_CONCEPT.md
+```
+
+Heavy vision dependencies (`ultralytics`, which pulls in torch) are kept out of
+`requirements.txt` until Session B.2 actually imports them:
+
+```bash
+python3 -m pip install -r requirements-vision.txt
 ```
 
 ## Repository layout
@@ -44,9 +57,13 @@ desk_arm/
 │   ├── arm_chain.py            # ikpy Chain constructor
 │   ├── inverse_kinematics.py   # IK with reachability + singularity checks
 │   ├── trajectory.py           # Trapezoidal velocity profiler
-│   └── visualizer.py           # 3D matplotlib rendering
+│   ├── visualizer.py           # 3D matplotlib rendering
+│   └── image_source.py         # ImageSource ABC + synthetic and webcam sources
+├── scripts/
+│   └── preview_camera.py       # Manual webcam check, not run by CI
 ├── tests/
-│   └── test_kinematics.py      # 32 tests covering all modules
+│   ├── test_kinematics.py      # 32 tests - Phase A kinematics
+│   └── test_image_source.py    # 71 tests - Session B.1 image acquisition
 ├── docs/
 │   ├── PROOF_OF_CONCEPT.md     # Design + math + validation
 │   └── figures/                # Generated diagrams
