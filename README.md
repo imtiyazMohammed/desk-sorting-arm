@@ -10,6 +10,11 @@ https://github.com/user-attachments/assets/2be9d9cc-dfaf-4284-88d5-a9f24a1ce587
 
 Simulation-only kinematics stack. No hardware required.
 
+**Requires Python 3.10-3.14.** `build123d` (Phase D parametric CAD) declares
+`requires-python ">=3.10,<3.15"`, so the Python 3.9 support present through
+Phase A has been dropped. Raspberry Pi OS Bookworm ships 3.11 and Trixie ships
+3.13, so 3.9 is not needed for the deployment target. CI covers 3.10-3.13.
+
 ## Quickstart
 
 ```bash
@@ -46,6 +51,7 @@ desk_arm/
 │   ├── PROOF_OF_CONCEPT.md     # Design + math + validation
 │   └── figures/                # Generated diagrams
 ├── requirements.txt
+├── requirements-vision.txt     # Deferred: ultralytics / torch
 └── README.md
 ```
 

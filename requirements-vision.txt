@@ -1,0 +1,11 @@
+# Heavyweight vision dependencies, kept out of requirements.txt on purpose.
+#
+# ultralytics pulls torch + torchvision (~2-3 GB). Nothing in Session B.1
+# imports it - src/image_source.py needs only numpy and cv2. This file gets
+# folded into requirements.txt in Session B.2, when the YOLOv8 detector is
+# actually written.
+#
+#   python3 -m pip install -r requirements-vision.txt
+
+-r requirements.txt
+ultralytics>=8.1,<9.0
