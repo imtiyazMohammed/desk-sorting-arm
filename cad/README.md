@@ -28,6 +28,7 @@ desk, edit `src/geometry.py`. Do not edit `cad/base_pedestal.py`.
 python3 -m cad.base_pedestal               # -> cad/output/base_pedestal.stl
 python3 -m cad.desk_clamp_knob             # -> cad/output/desk_clamp_knob.stl
 python3 -m cad.desk_clamp_pressure_foot    # -> cad/output/desk_clamp_pressure_foot.stl
+python3 -m cad.assembly_preview            # -> assembly_preview.stl + .png
 ```
 
 Each module takes `--report` (print resolved dimensions, export nothing) and
@@ -188,9 +189,18 @@ print comes out loose, epoxy it — the foot carries pure compression.
 | Hex socket (top) | 13.10 mm across flats × 7.80 mm deep |
 | Grip flutes | 12 × Ø8.00 mm scallops |
 
-**The boss exists for friction control.** Torque spent rubbing the knob's face
-against the arm never becomes clamping force, and that loss scales with contact
-radius. Confining contact to an 18 mm collar is what keeps hand torque useful.
+**Why it stayed 50 mm.** The knob was scheduled to shrink to 30 mm, on the
+grounds that a large knob lets a hand exceed the printed jaw's 3.9 N·m limit.
+That limit belonged to D.1b's cantilever wing. The U-clamp's bottom arm takes
+**11.62 N·m** and a 50 mm knob reaches only 1.00 N·m — 11.6× of headroom — so
+there is nothing left to protect against, while shrinking would have cut the
+grip margin from 2.39× to 1.43×. The shrink was cancelled.
+
+**On the bearing boss.** It was added in D.1b, where the knob bore against the
+upper jaw and collar friction there ate much of the hand torque. In the
+U-clamp the knob does **not** touch the clamp — see the assembly preview — so
+that contact no longer exists. The boss is currently inert; see *Known future
+work*.
 
 Print **socket-face down**: no support needed and the gripping surfaces come
 out crisp.
@@ -310,6 +320,42 @@ top pointing at the desk. Wind it down so the foot sits low in the throat.
 
 ---
 
+## Assembly preview
+
+```bash
+python3 -m cad.assembly_preview                      # STL + PNG
+python3 -m cad.assembly_preview --report             # summary only
+python3 -m cad.assembly_preview --desk-thickness 35  # any desk in range
+```
+
+![Assembly preview](output/assembly_preview.png)
+
+Every part placed on a 1200 × 600 mm desk at the position `ArmGeometry`
+actually specifies, with the arm's links drawn as placeholder cylinders at
+their zero pose. Individual parts each pass their own design rules, but
+nothing else checks that they *fit together on a real desk* — this does, and
+`tests/test_cad.py` asserts the same properties numerically rather than
+relying on the picture.
+
+| | |
+|---|---|
+| Yaw axis on desk | (600.0, 30.0) mm |
+| Clamp footprint | 82.5 (X) × 80.0 (Y) mm |
+| Knob hangs below the bottom arm | 24.8 mm (on a 25 mm desk) |
+| Printed volume | 320.6 cm³ solid |
+| Estimated filament | ≈ 142 g PETG at 35% infill |
+
+The arm at zero pose reaches 980 mm along +Y, well past the desk's 600 mm
+depth. That is correct rather than alarming: the zero pose is a fully extended
+horizontal reference posture, not a working position.
+
+The scene is exported as a single STL with each solid left as its own closed
+shell — a scene, not a manufacturable part. Rendering uses matplotlib over the
+tessellated mesh, because build123d's own viewers need a live GUI session and
+are unusable from a script or in CI.
+
+---
+
 ## ⚠ Unverified dimensions
 
 The DS3218 body envelope (40 × 20 × 40.5 mm), mass, gear ratio, torque and speed
@@ -375,6 +421,15 @@ disagreement and fails if a future change pushes the corner past 89%.
 - **`BaseStack` is provisional.** The 6 mm turntable plate and 24 mm shoulder
   bracket rise are estimates. Sessions D.2 and D.3 replace them; the turret
   height then follows automatically.
+- **The knob's collar friction is mis-modelled — conservatively.**
+  `DeskClampSpec.torque_to_preload_factor_m` still includes a collar term for
+  the knob's boss bearing on the clamp, which was true in D.1b but is not true
+  here: the assembly preview shows the knob hanging clear below the bottom arm.
+  The real rubbing interface is the screw's tip against the pressure foot, at a
+  much smaller radius. The current model therefore *understates* preload by
+  roughly a third (350 N rather than ~530 N at 1.00 N·m), so every margin
+  quoted above is pessimistic and nothing is unsafe — but the boss serves no
+  purpose as modelled and the term should be re-derived.
 - **The stress model is a hand calculation.** A rectangular-section cantilever
   with a point load is a reasonable first approximation, but it ignores the
   spine's restraint and PETG's anisotropy between layers. If the clamp is ever

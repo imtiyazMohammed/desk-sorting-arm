@@ -59,6 +59,11 @@ from cad.desk_clamp_knob import (  # noqa: E402
     build_knob,
     export_knob,
 )
+from cad.assembly_preview import (  # noqa: E402
+    build_assembly,
+    export_assembly_stl,
+    render_assembly_png,
+)
 from cad.desk_clamp_pressure_foot import (  # noqa: E402
     PressureFootDesignError,
     PressureFootParameters,
@@ -120,7 +125,18 @@ class Mesh:
         unique, inverse = np.unique(
             np.round(soup, decimals), axis=0, return_inverse=True
         )
-        return cls(unique, inverse.reshape(-1, 3))
+        faces = inverse.reshape(-1, 3)
+
+        # Drop zero-area triangles before any topology analysis. OpenCASCADE
+        # emits two of them at each pole when it tessellates a sphere -- a
+        # triangle whose two corners weld to the same vertex. They carry no
+        # surface, but they contribute phantom edges that would otherwise
+        # register as non-manifold. Discarding degenerate faces is standard
+        # mesh cleanup and leaves the enclosed volume unchanged.
+        non_degenerate = np.array(
+            [len(set(face.tolist())) == 3 for face in faces], dtype=bool
+        )
+        return cls(unique, faces[non_degenerate])
 
     def edge_use_counts(self) -> collections.Counter:
         """How many faces use each *undirected* edge. Closed surface => all 2."""
@@ -1480,3 +1496,188 @@ class TestStlExport:
         low, high = meshes["base_pedestal"].bounding_box()
         assert low[2] == pytest.approx(params.bottom_arm_bottom_z_mm, abs=1e-3)
         assert high[2] == pytest.approx(params.turret_top_z_mm, abs=1e-3)
+
+
+# =========================================================================
+# 11. Assembly preview
+# =========================================================================
+
+
+@pytest.fixture(scope="module")
+def assembly():
+    """The whole scene placed on a nominal desk."""
+    return build_assembly()
+
+
+class TestAssemblyPreview:
+    def test_assembly_preview_generates_stl(self, assembly, tmp_path):
+        """Exists, is non-empty, and every shell in it is closed."""
+        path = export_assembly_stl(tmp_path / "assembly_preview.stl", assembly)
+        assert path.exists()
+        assert path.stat().st_size > 0
+
+        mesh = Mesh.from_binary_stl(path)
+        offenders = {
+            edge: count
+            for edge, count in mesh.edge_use_counts().items()
+            if count != 2
+        }
+        assert not offenders, (
+            f"{len(offenders)} non-manifold or boundary edge(s) in the assembly"
+        )
+        assert mesh.signed_volume_mm3() > 0.0
+
+    def test_assembly_stl_is_a_well_formed_binary_stl(self, assembly, tmp_path):
+        path = export_assembly_stl(tmp_path / "assembly.stl", assembly)
+        raw = path.read_bytes()
+        triangle_count = struct.unpack("<I", raw[80:84])[0]
+        assert triangle_count > 0
+        assert len(raw) == 84 + 50 * triangle_count
+
+    def test_assembly_placement_matches_arm_geometry(self, assembly):
+        """
+        The yaw axis must land exactly where ArmGeometry says the base is.
+
+        Checked through the placed solid's bounding box rather than by reading
+        back a stored number: the clamp is modelled with its own +X pointing
+        inward and is rotated 90 degrees into the desk frame, so this catches a
+        wrong rotation or a missed translation, which echoing a field would not.
+        """
+        placed = assembly.by_name("base_pedestal").solid
+        params = PedestalParameters.from_geometry()
+        box = placed.bounding_box()
+        base_x = DEFAULT_ARM.base_x_on_desk_mm
+        base_y = DEFAULT_ARM.base_y_on_desk_mm
+
+        # Clamp +X becomes desk +Y, so its width now spans desk X about the base.
+        assert box.min.X == pytest.approx(
+            base_x - params.clamp_width_mm / 2.0, abs=1e-6
+        )
+        assert box.max.X == pytest.approx(
+            base_x + params.clamp_width_mm / 2.0, abs=1e-6
+        )
+        # ... and its profile spans desk Y from the spine to the arm's inner end.
+        assert box.min.Y == pytest.approx(
+            base_y + params.spine_outer_x_mm, abs=1e-6
+        )
+        assert box.max.Y == pytest.approx(
+            base_y + params.top_arm_inner_x_mm, abs=1e-6
+        )
+
+    def test_desk_edge_lands_on_the_clamps_seating_plane(self, assembly):
+        """
+        The desk's edge is at y = 0, and the clamp seats it exactly there.
+
+        This is the check that keeps ArmGeometry.base_y_on_desk_mm and
+        DeskClampSpec.servo_shaft_offset_from_edge_mm honest against each
+        other: if either drifts, the desk edge stops landing on the gussets.
+        """
+        params = PedestalParameters.from_geometry()
+        seat_y = DEFAULT_ARM.base_y_on_desk_mm + params.desk_seat_x_mm
+        assert seat_y == pytest.approx(0.0, abs=1e-9)
+
+    def test_clamp_spine_hangs_off_the_desk_edge(self, assembly):
+        """The spine wraps the edge, so part of the clamp is beyond the desk."""
+        box = assembly.by_name("base_pedestal").solid.bounding_box()
+        assert box.min.Y < 0.0
+        assert box.max.Y > 0.0
+
+    def test_pedestal_does_not_intersect_placeholder_arm_links(self, assembly):
+        """
+        At the zero pose the links run horizontally at the shoulder height, and
+        the turret must stay clear beneath them. A collision here would mean
+        the base height budget is wrong.
+        """
+        pedestal = assembly.by_name("base_pedestal").solid
+        for name in ("L1 upper arm", "L2 forearm", "L3 wrist-to-TCP"):
+            link = assembly.by_name(name).solid
+            overlap = pedestal.intersect(link)
+            volume = 0.0 if overlap is None else float(overlap.volume)
+            assert volume == pytest.approx(0.0, abs=1e-6), (
+                f"{name} overlaps the pedestal by {volume:.3f} mm3"
+            )
+
+    def test_arm_links_clear_the_turret_vertically(self, assembly):
+        """The margin, not just the absence of contact."""
+        pedestal_top = assembly.by_name("base_pedestal").solid.bounding_box().max.Z
+        link_bottom = assembly.by_name("L1 upper arm").solid.bounding_box().min.Z
+        assert link_bottom > pedestal_top
+        assert link_bottom - pedestal_top > 5.0
+
+    def test_arm_links_stay_above_the_desk(self, assembly):
+        """Nothing may pass through the desk surface at the zero pose."""
+        for name in ("L1 upper arm", "L2 forearm", "L3 wrist-to-TCP", "TCP marker"):
+            assert assembly.by_name(name).solid.bounding_box().min.Z > 0.0
+
+    def test_links_start_at_the_shoulder_and_run_inward(self, assembly):
+        """Zero pose is horizontal along the base frame's +X, i.e. desk +Y."""
+        base_y = DEFAULT_ARM.base_y_on_desk_mm
+        link1 = assembly.by_name("L1 upper arm").solid.bounding_box()
+        assert link1.min.Y == pytest.approx(base_y, abs=1e-6)
+        assert link1.max.Y == pytest.approx(
+            base_y + DEFAULT_ARM.l1_upper_arm_mm, abs=1e-6
+        )
+
+    def test_tcp_marker_sits_at_full_reach(self, assembly):
+        """FK's zero pose puts the TCP at total_reach along +X from the base."""
+        box = assembly.by_name("TCP marker").solid.bounding_box()
+        centre_y = (box.min.Y + box.max.Y) / 2.0
+        assert centre_y == pytest.approx(
+            DEFAULT_ARM.base_y_on_desk_mm + DEFAULT_ARM.total_reach_mm, abs=1e-6
+        )
+        centre_z = (box.min.Z + box.max.Z) / 2.0
+        assert centre_z == pytest.approx(DEFAULT_ARM.base_height_mm, abs=1e-6)
+
+    def test_pressure_foot_bears_on_the_desk_underside(self, assembly):
+        """Its contact face must reach the desk, or the clamp grips nothing."""
+        box = assembly.by_name("pressure_foot").solid.bounding_box()
+        assert box.max.Z == pytest.approx(-assembly.desk_thickness_mm, abs=1e-6)
+
+    def test_knob_hangs_clear_below_the_bottom_arm(self, assembly):
+        """
+        The knob is a handle, not a bearing surface.
+
+        It has to stay clear of the bottom arm: if it touched, further
+        tightening would jam against the clamp instead of loading the desk.
+        """
+        params = PedestalParameters.from_geometry()
+        knob_top = assembly.by_name("knob").solid.bounding_box().max.Z
+        assert knob_top < params.bottom_arm_bottom_z_mm
+        assert assembly.knob_drop_below_arm_mm > 0.0
+
+    def test_desk_slab_matches_arm_geometry(self, assembly):
+        box = assembly.by_name("desk").solid.bounding_box()
+        assert box.max.X - box.min.X == pytest.approx(DEFAULT_ARM.desk_width_mm)
+        assert box.max.Y - box.min.Y == pytest.approx(DEFAULT_ARM.desk_depth_mm)
+        assert box.max.Z == pytest.approx(0.0, abs=1e-6)
+
+    def test_scenery_is_excluded_from_the_print_estimate(self, assembly):
+        """The desk and the arm placeholders are not parts we make."""
+        printed = {part.name for part in assembly.printed_parts}
+        assert printed == {"base_pedestal", "pressure_foot", "knob"}
+        assert assembly.estimated_print_mass_g > 0.0
+
+    @pytest.mark.parametrize("thickness", [15.0, 25.0, 35.0])
+    def test_every_supported_desk_thickness_assembles(self, thickness):
+        """The clamp has to work across its whole stated range, not just one desk."""
+        scene = build_assembly(desk_thickness_mm=thickness)
+        foot = scene.by_name("pressure_foot").solid.bounding_box()
+        assert foot.max.Z == pytest.approx(-thickness, abs=1e-6)
+        assert scene.knob_drop_below_arm_mm > 0.0
+
+    @pytest.mark.parametrize("thickness", [5.0, 50.0])
+    def test_unsupported_desk_thickness_rejected(self, thickness):
+        with pytest.raises(ValueError, match="outside the clamp"):
+            build_assembly(desk_thickness_mm=thickness)
+
+    def test_render_writes_a_png(self, assembly, tmp_path):
+        path = render_assembly_png(tmp_path / "preview.png", assembly)
+        assert path.exists()
+        assert path.stat().st_size > 0
+        assert path.read_bytes()[:8] == b"\x89PNG\r\n\x1a\n"
+
+    def test_summary_names_the_scene_numbers(self, assembly):
+        summary = assembly.summary()
+        for heading in ("Desk", "Yaw axis on desk", "Clamp footprint",
+                        "Est. filament mass"):
+            assert heading in summary

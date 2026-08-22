@@ -23,7 +23,7 @@ Phase A has been dropped. Raspberry Pi OS Bookworm ships 3.11 and Trixie ships
 # 1. Install dependencies
 python3 -m pip install -r requirements.txt
 
-# 2. Run the test suite (402 tests, ~8 seconds)
+# 2. Run the test suite (423 tests, ~11 seconds)
 python3 -m pytest tests/ -v
 
 # 3. Try the module smoke tests
@@ -38,6 +38,7 @@ python3 -m src.camera_calibration    # synthetic calibration vs ground truth
 python3 -m cad.base_pedestal            # monolithic U-clamp + servo turret
 python3 -m cad.desk_clamp_knob          # hand knob
 python3 -m cad.desk_clamp_pressure_foot # foot on the clamp screw's tip
+python3 -m cad.assembly_preview         # whole assembly on a desk: STL + PNG
 #   ... each takes --report (dimensions only) and --output PATH
 
 # 5. Manual hardware tools (need a webcam; not part of the test suite)
@@ -73,6 +74,7 @@ desk_arm/
 │   ├── base_pedestal.py        # Monolithic U-clamp + servo turret (build123d)
 │   ├── desk_clamp_knob.py      # Fluted hand knob
 │   ├── desk_clamp_pressure_foot.py  # Foot on the clamp screw's tip
+│   ├── assembly_preview.py     # All parts placed on a desk (STL + PNG)
 │   ├── _design.py              # Shared DesignStatus / DesignRuleError
 │   ├── _primitives.py          # Shared solids (hex_prism)
 │   ├── output/                 # Generated STLs
@@ -84,7 +86,7 @@ desk_arm/
 │   ├── test_kinematics.py      # 32 tests - Phase A kinematics
 │   ├── test_image_source.py    # 71 tests - Session B.1 image acquisition
 │   ├── test_camera_calibration.py  # 100 tests - Session B.2 calibration
-│   └── test_cad.py             # 196 tests - Sessions D.1/D.1b/D.1c parametric CAD
+│   └── test_cad.py             # 217 tests - Sessions D.1/D.1b/D.1c parametric CAD
 ├── docs/
 │   ├── PROOF_OF_CONCEPT.md     # Design + math + validation
 │   └── figures/                # Generated diagrams

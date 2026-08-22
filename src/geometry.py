@@ -712,6 +712,17 @@ class DeskClampSpec:
         return self.desk_thickness_range_mm[1]
 
     @property
+    def nominal_desk_thickness_mm(self) -> float:
+        """
+        Mid-range desk thickness, in mm.
+
+        Used wherever a single representative desk is needed -- the assembly
+        preview, worked examples -- rather than hardcoding a number that would
+        then drift from the supported range.
+        """
+        return float(sum(self.desk_thickness_range_mm) / 2.0)
+
+    @property
     def desk_removal_clearance_mm(self) -> float:
         """Slack above the thickest desk, for sliding the clamp on and off."""
         return self.throat_max_opening_mm - self.max_desk_thickness_mm
