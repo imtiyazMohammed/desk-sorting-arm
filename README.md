@@ -1,4 +1,11 @@
 # Autonomous Desk-Sorting Robotic Arm — Phase A
+
+
+
+https://github.com/user-attachments/assets/2be9d9cc-dfaf-4284-88d5-a9f24a1ce587
+
+
+
 [![Tests](https://github.com/imtiyazMohammed/desk-sorting-arm/actions/workflows/tests.yml/badge.svg)](https://github.com/imtiyazMohammed/desk-sorting-arm/actions/workflows/tests.yml)
 
 Simulation-only kinematics stack. No hardware required.
