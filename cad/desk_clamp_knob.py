@@ -11,21 +11,24 @@ What the part does
 A fluted disc pressed onto the head of the clamp screw so the whole assembly
 can be tightened by hand, with no tool. Bottom to top along +Z:
 
-1. **Bearing boss** -- a short raised collar around the bolt hole, the only
-   part of the knob that touches the upper jaw. Its purpose is friction
-   control: torque spent rubbing this face never becomes clamping force, and
-   the loss scales with contact radius. A full 50 mm face would waste most of
-   the hand torque, so the contact is deliberately confined to a small collar
-   (see ``DeskClampSpec.torque_to_preload_factor_m``).
-2. **Knob body** -- the disc the hand grips, with
-   ``knob_flute_count`` scallops cut around its perimeter.
-3. **Hex socket** in the top face, taking the screw's hex head so the knob and
+1. **Knob body** -- the disc the hand grips, with ``knob_flute_count``
+   scallops cut around its perimeter.
+2. **Hex socket** in the top face, taking the screw's hex head so the knob and
    screw turn together. It is sunk ``knob_head_recess_mm`` below the top face,
    which both protects the head and shortens the screw length the clamp stack
    needs.
 
-A clearance hole runs from the socket floor down through the boss for the
+A clearance hole runs from the socket floor through to the underside for the
 screw's shank.
+
+The knob touches nothing but the screw
+--------------------------------------
+Session D.1b gave this part a small bearing boss, because there the knob bore
+against the clamp's upper jaw and confining that rubbing contact to a small
+radius kept hand torque useful. The D.1c U-clamp has no such contact: the
+knob hangs free below the bottom arm -- the load path runs screw, captive nut,
+nut pocket -- and a knob that reached the arm would jam against it instead of
+loading the desk. The boss was doing nothing, and Session D.1d removed it.
 
 Print and fit notes
 -------------------
@@ -75,8 +78,6 @@ class KnobParameters:
 
     body_diameter_mm: float
     body_thickness_mm: float
-    boss_diameter_mm: float
-    boss_height_mm: float
 
     socket_across_flats_mm: float
     socket_depth_mm: float
@@ -133,8 +134,6 @@ class KnobParameters:
         params = cls(
             body_diameter_mm=clamp.knob_diameter_mm,
             body_thickness_mm=clamp.knob_thickness_mm,
-            boss_diameter_mm=clamp.knob_boss_diameter_mm,
-            boss_height_mm=clamp.knob_boss_height_mm,
             socket_across_flats_mm=(
                 clamp.bolt_head_across_flats_mm + press_fit_clearance_mm
             ),
@@ -153,8 +152,14 @@ class KnobParameters:
 
     @property
     def total_height_mm(self) -> float:
-        """Boss plus body: the knob's full printed height."""
-        return self.boss_height_mm + self.body_thickness_mm
+        """
+        The knob's full printed height.
+
+        Equal to the body thickness since Session D.1d removed the bearing
+        boss. Kept as a distinct property because the clamp stack and the
+        assembly preview both measure against it.
+        """
+        return self.body_thickness_mm
 
     @property
     def socket_across_corners_mm(self) -> float:
@@ -198,8 +203,6 @@ class KnobParameters:
         for name, value in (
             ("body_diameter_mm", self.body_diameter_mm),
             ("body_thickness_mm", self.body_thickness_mm),
-            ("boss_diameter_mm", self.boss_diameter_mm),
-            ("boss_height_mm", self.boss_height_mm),
             ("socket_depth_mm", self.socket_depth_mm),
             ("flute_radius_mm", self.flute_radius_mm),
         ):
@@ -229,13 +232,6 @@ class KnobParameters:
                 f"({self.socket_across_flats_mm:.2f} mm), so the head would "
                 "have no shoulder to bear on.",
             )
-        if self.bolt_hole_diameter_mm + 2.0 * self.min_wall_thickness_mm > self.boss_diameter_mm:
-            raise KnobDesignError(
-                DesignStatus.WALL_TOO_THIN,
-                f"Boss ({self.boss_diameter_mm:.2f} mm) leaves less than "
-                f"{self.min_wall_thickness_mm:.2f} mm of wall around the "
-                f"{self.bolt_hole_diameter_mm:.2f} mm bore.",
-            )
         socket_wall = (
             self.grip_min_radius_mm - self.socket_across_corners_mm / 2.0
         )
@@ -246,11 +242,11 @@ class KnobParameters:
                 f"and the deepest flute; "
                 f"{self.min_wall_thickness_mm:.2f} mm required.",
             )
-        if self.grip_min_radius_mm <= self.boss_diameter_mm / 2.0:
+        if self.grip_min_radius_mm <= self.bolt_hole_diameter_mm / 2.0:
             raise KnobDesignError(
                 DesignStatus.FEATURE_COLLISION,
                 f"Flutes cut to r = {self.grip_min_radius_mm:.2f} mm, inside "
-                f"the boss radius ({self.boss_diameter_mm / 2.0:.2f} mm).",
+                f"the shank bore ({self.bolt_hole_diameter_mm / 2.0:.2f} mm).",
             )
         return DesignStatus.OK
 
@@ -263,8 +259,6 @@ class KnobParameters:
             f"--------------------------\n"
             f"  Body                   : {self.body_diameter_mm:.2f} mm dia x "
             f"{self.body_thickness_mm:.2f} mm\n"
-            f"  Bearing boss           : {self.boss_diameter_mm:.2f} mm dia x "
-            f"{self.boss_height_mm:.2f} mm\n"
             f"  Total printed height   : {self.total_height_mm:.2f} mm\n"
             f"\n"
             f"  Hex socket (top)       : {self.socket_across_flats_mm:.2f} mm "
@@ -287,8 +281,8 @@ def build_knob(params: Optional[KnobParameters] = None) -> Part:
     Returns
     -------
     build123d.Part
-        A single solid. Origin on the clamp screw axis at the boss's bearing
-        face, +Z toward the knob's top.
+        A single solid. Origin on the clamp screw axis at the knob's
+        underside, +Z toward its top.
 
     Raises
     ------
@@ -300,13 +294,8 @@ def build_knob(params: Optional[KnobParameters] = None) -> Part:
 
     bottom = (Align.CENTER, Align.CENTER, Align.MIN)
 
-    # ---- Bearing boss, then the knob body above it -----------------------
+    # ---- Knob body -------------------------------------------------------
     part = Cylinder(
-        radius=params.boss_diameter_mm / 2.0,
-        height=params.boss_height_mm,
-        align=bottom,
-    )
-    part += Pos(0, 0, params.boss_height_mm) * Cylinder(
         radius=params.body_diameter_mm / 2.0,
         height=params.body_thickness_mm,
         align=bottom,
@@ -315,7 +304,7 @@ def build_knob(params: Optional[KnobParameters] = None) -> Part:
     # ---- Grip flutes around the perimeter --------------------------------
     # Centred on the rim so each cylinder bites a half-round scallop out of it.
     for flute_x, flute_y in params.flute_positions:
-        part -= Pos(flute_x, flute_y, params.boss_height_mm) * Cylinder(
+        part -= Pos(flute_x, flute_y, 0) * Cylinder(
             radius=params.flute_radius_mm,
             height=params.body_thickness_mm,
             align=bottom,
@@ -326,7 +315,7 @@ def build_knob(params: Optional[KnobParameters] = None) -> Part:
         0, 0, params.total_height_mm - params.socket_depth_mm
     ) * hex_prism(params.socket_across_flats_mm, params.socket_depth_mm)
 
-    # ---- Shank bore from the socket floor down through the boss ----------
+    # ---- Shank bore from the socket floor to the underside ---------------
     part -= Cylinder(
         radius=params.bolt_hole_diameter_mm / 2.0,
         height=params.shank_bore_length_mm,

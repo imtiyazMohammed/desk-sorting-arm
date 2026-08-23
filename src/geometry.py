@@ -606,13 +606,36 @@ class DeskClampSpec:
     pressure_foot_diameter_mm: float = 24.0
     #: Diameter of the pad recess in the foot's upper face, in mm.
     pressure_foot_pad_diameter_mm: float = 20.0
-    #: Blind bore the screw's tip threads into. Sized as an M8 tapping hole so
-    #: the screw cuts its own thread in PETG; epoxy it if a test print is loose.
-    pressure_foot_bore_diameter_mm: float = 7.0
-    pressure_foot_bore_depth_mm: float = 6.0
-    #: Material between the bore's crown and the pad recess floor, in mm.
+
+    #: Conical seat in the foot's underside that the screw's tip pivots in.
+    #:
+    #: Session D.1d replaced a threaded bore with this. A foot threaded onto a
+    #: turning screw rotates with it, dragging its rubber pad across the desk
+    #: as you tighten -- which scuffs the finish and, because friction then
+    #: acts at the pad's radius rather than the screw's, roughly halves the
+    #: preload a given hand torque produces. Seated on a cone the foot is free
+    #: to stay still while the screw turns inside it, which is what every
+    #: monitor-arm clamp does.
+    pressure_foot_seat_diameter_mm: float = 9.0
+    #: Flat at the cone's apex, in mm. Truncating the cone keeps a sharp
+    #: internal point out of the print -- which no nozzle can resolve anyway --
+    #: and avoids the degenerate tessellation a true apex produces in STL. The
+    #: screw's tip contacts the cone wall well above it, so it is functionally
+    #: free.
+    pressure_foot_seat_apex_diameter_mm: float = 2.0
+    #: Included angle of that cone, in degrees. A standard countersink angle,
+    #: shallow enough to keep the foot thin. It also sets how much the cone
+    #: amplifies contact force -- see :meth:`torque_to_preload_factor_m`.
+    pressure_foot_seat_angle_deg: float = 120.0
+    #: Material between the seat's apex and the pad recess floor, in mm.
     #: Loaded in pure compression, so it does not need a structural thickness.
     pressure_foot_web_mm: float = 2.0
+
+    #: Diameter of the screw's chamfered end, in mm. Sets the radius at which
+    #: the tip contacts the cone, and therefore the friction lever. Roughly the
+    #: thread's minor diameter for an ISO 4753 chamfer; UNVERIFIED to better
+    #: than a few tenths, which moves preload by only a few percent.
+    bolt_tip_diameter_mm: float = 6.4
 
     # ---- Hand knob ----------------------------------------------------------
     knob_diameter_mm: float = 50.0
@@ -622,11 +645,6 @@ class DeskClampSpec:
     knob_head_recess_mm: float = 2.50
     #: Number of grip flutes cut around the knob's perimeter.
     knob_flute_count: int = 12
-    #: Diameter and height of the small bearing boss under the knob. Keeping
-    #: the rubbing contact on a small radius is what stops collar friction
-    #: from swallowing most of the hand torque -- see :meth:`bolt_preload_n`.
-    knob_boss_diameter_mm: float = 18.0
-    knob_boss_height_mm: float = 2.0
 
     # ---- Friction coefficients ----------------------------------------------
     #: Anti-slip pad against the desk. 0.4 is the PETG-on-wood figure, used
@@ -635,7 +653,9 @@ class DeskClampSpec:
     pad_friction_coefficient: float = 0.40
     #: Steel bolt thread in a steel nut, dry.
     thread_friction_coefficient: float = 0.15
-    #: Printed knob boss bearing on the printed bottom arm.
+    #: Steel screw tip against the printed cone of the pressure foot. Until
+    #: Session D.1d this modelled a knob boss bearing on the clamp, a contact
+    #: the U-clamp does not have: the knob hangs free below the bottom arm.
     collar_friction_coefficient: float = 0.30
 
     def __post_init__(self) -> None:
@@ -658,9 +678,9 @@ class DeskClampSpec:
             "servo_shaft_offset_from_edge_mm", "gusset_size_mm",
             "pad_recess_depth_mm", "pad_thickness_mm",
             "bolt_nominal_diameter_mm", "bolt_thread_pitch_mm", "bolt_length_mm",
-            "pressure_foot_diameter_mm", "pressure_foot_bore_depth_mm",
-            "pressure_foot_web_mm",
-            "knob_diameter_mm", "knob_thickness_mm", "knob_boss_diameter_mm",
+            "pressure_foot_diameter_mm", "pressure_foot_seat_diameter_mm",
+            "pressure_foot_web_mm", "bolt_tip_diameter_mm",
+            "knob_diameter_mm", "knob_thickness_mm",
         ):
             if getattr(self, name) <= 0.0:
                 raise ValueError(
@@ -704,22 +724,33 @@ class DeskClampSpec:
                 f"({self.pressure_foot_pad_diameter_mm}) must be smaller than "
                 f"the foot itself ({self.pressure_foot_diameter_mm})."
             )
-        if self.pressure_foot_bore_diameter_mm >= self.pressure_foot_pad_diameter_mm:
+        if self.pressure_foot_seat_diameter_mm >= self.pressure_foot_pad_diameter_mm:
             raise ValueError(
-                "DeskClampSpec: the pressure foot's bore must be smaller than "
+                "DeskClampSpec: the pressure foot's seat must be smaller than "
                 "its pad recess."
             )
-        if self.knob_boss_diameter_mm >= self.knob_diameter_mm:
+        if not 0.0 < self.pressure_foot_seat_angle_deg < 180.0:
             raise ValueError(
-                "DeskClampSpec: knob_boss_diameter_mm must be smaller than "
-                "knob_diameter_mm."
+                f"DeskClampSpec: pressure_foot_seat_angle_deg must be a real "
+                f"included angle in (0, 180), got "
+                f"{self.pressure_foot_seat_angle_deg}."
             )
-        if self.knob_boss_diameter_mm <= self.bolt_clearance_hole_diameter_mm:
+        if self.pressure_foot_seat_apex_diameter_mm >= self.pressure_foot_seat_diameter_mm:
             raise ValueError(
-                f"DeskClampSpec: knob_boss_diameter_mm "
-                f"({self.knob_boss_diameter_mm}) must exceed the bolt "
-                f"clearance hole ({self.bolt_clearance_hole_diameter_mm}), or "
-                "the boss is not an annulus."
+                "DeskClampSpec: the seat's apex flat must be smaller than its "
+                "mouth, or the seat is a plain counterbore rather than a cone."
+            )
+        if not (
+            self.pressure_foot_seat_apex_diameter_mm
+            < self.bolt_tip_diameter_mm
+            < self.pressure_foot_seat_diameter_mm
+        ):
+            raise ValueError(
+                f"DeskClampSpec: the screw tip ({self.bolt_tip_diameter_mm} mm) "
+                f"must sit between the seat's apex flat "
+                f"({self.pressure_foot_seat_apex_diameter_mm} mm) and its mouth "
+                f"({self.pressure_foot_seat_diameter_mm} mm) so it contacts the "
+                "cone wall rather than bottoming out or missing the seat."
             )
         if self.knob_flute_count < 3:
             raise ValueError(
@@ -771,18 +802,65 @@ class DeskClampSpec:
         return self.bottom_arm_thickness_mm - self.nut_pocket_depth_mm
 
     @property
+    def pressure_foot_seat_half_angle_rad(self) -> float:
+        """Half the seat cone's included angle, in radians."""
+        return float(np.radians(self.pressure_foot_seat_angle_deg / 2.0))
+
+    @property
+    def pressure_foot_seat_depth_mm(self) -> float:
+        """
+        Depth of the conical seat, mouth to truncated apex, in mm.
+
+        Set by the mouth and apex diameters and the cone angle: a shallower
+        cone (larger included angle) gives a thinner foot.
+        """
+        return float(
+            (
+                self.pressure_foot_seat_diameter_mm / 2.0
+                - self.pressure_foot_seat_apex_diameter_mm / 2.0
+            )
+            / np.tan(self.pressure_foot_seat_half_angle_rad)
+        )
+
+    @property
     def pressure_foot_height_mm(self) -> float:
         """Total printed height of the pressure foot, in mm."""
         return (
-            self.pressure_foot_bore_depth_mm
+            self.pressure_foot_seat_depth_mm
             + self.pressure_foot_web_mm
             + self.pad_recess_depth_mm
         )
 
     @property
+    def screw_tip_contact_radius_mm(self) -> float:
+        """
+        Radius at which the screw's tip touches the cone, in mm.
+
+        The tip's chamfered edge rests against the cone wall, so the contact is
+        a circle at the tip's own radius -- not at the seat's mouth.
+        """
+        return self.bolt_tip_diameter_mm / 2.0
+
+    @property
+    def screw_tip_seat_height_mm(self) -> float:
+        """
+        How far above the foot's underside the seated screw tip sits, in mm.
+
+        The tip stops where its edge meets the cone, part-way down rather than
+        at the apex.
+        """
+        mouth_radius = self.pressure_foot_seat_diameter_mm / 2.0
+        apex_radius = self.pressure_foot_seat_apex_diameter_mm / 2.0
+        return float(
+            self.pressure_foot_seat_depth_mm
+            * (mouth_radius - self.screw_tip_contact_radius_mm)
+            / (mouth_radius - apex_radius)
+        )
+
+    @property
     def pressure_foot_rise_above_tip_mm(self) -> float:
         """How far the foot's contact face stands above the screw's tip."""
-        return self.pressure_foot_web_mm + self.pad_recess_depth_mm
+        return self.pressure_foot_height_mm - self.screw_tip_seat_height_mm
 
     @property
     def knob_socket_depth_mm(self) -> float:
@@ -833,10 +911,24 @@ class DeskClampSpec:
             T = F * [ d2/2 * (p + pi*mu_t*d2*sec(a)) / (pi*d2 - mu_t*p*sec(a))
                       + mu_c * r_c ]
 
-        with ``d2`` the pitch diameter (``d - 0.6495*p`` for ISO metric),
-        ``a = 30 deg`` the thread half-angle, and ``r_c`` the mean radius of
-        the knob's bearing boss. The collar term dominates, which is why the
-        boss is kept small.
+        with ``d2`` the pitch diameter (``d - 0.6495*p`` for ISO metric) and
+        ``a = 30 deg`` the thread half-angle.
+
+        **The collar term changed in Session D.1d.** It previously modelled a
+        boss under the knob bearing on the clamp -- a contact the D.1b jaw had
+        but the U-clamp does not, because the knob hangs free below the bottom
+        arm. The real rubbing interface is the screw's tip turning in the
+        pressure foot's conical seat, so ``r_c`` is the tip's contact radius,
+        divided by ``sin`` of the cone's half-angle because a cone wedges the
+        contact force above the axial load:
+
+            r_c_effective = r_tip / sin(seat_half_angle)
+
+        A lumped nut factor (``T = K*F*d``, K about 0.2 dry steel-on-steel)
+        would be the textbook alternative, but K is calibrated for a flat
+        steel bearing face under the head. This joint has neither -- the head
+        turns with the knob and touches nothing -- so deriving the two real
+        interfaces is both more honest and more transferable.
         """
         pitch_diameter = (
             self.bolt_nominal_diameter_mm - 0.6495 * self.bolt_thread_pitch_mm
@@ -854,11 +946,11 @@ class DeskClampSpec:
         )
         thread_term_mm = (pitch_diameter / 2.0) * (numerator / denominator)
 
-        collar_radius_mm = (
-            self.knob_boss_diameter_mm / 2.0
-            + self.bolt_clearance_hole_diameter_mm / 2.0
-        ) / 2.0
-        collar_term_mm = self.collar_friction_coefficient * collar_radius_mm
+        collar_term_mm = (
+            self.collar_friction_coefficient
+            * self.screw_tip_contact_radius_mm
+            / np.sin(self.pressure_foot_seat_half_angle_rad)
+        )
 
         return float((thread_term_mm + collar_term_mm) / 1000.0)
 

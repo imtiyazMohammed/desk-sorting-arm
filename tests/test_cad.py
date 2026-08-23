@@ -522,7 +522,7 @@ class TestDeskClampSpec:
     def test_pressure_foot_height_is_the_sum_of_its_layers(self):
         clamp = DEFAULT_HARDWARE.desk_clamp
         assert clamp.pressure_foot_height_mm == pytest.approx(
-            clamp.pressure_foot_bore_depth_mm
+            clamp.pressure_foot_seat_depth_mm
             + clamp.pressure_foot_web_mm
             + clamp.pad_recess_depth_mm
         )
@@ -530,7 +530,7 @@ class TestDeskClampSpec:
     def test_pressure_foot_rise_shortens_the_screw_reach_needed(self):
         clamp = DEFAULT_HARDWARE.desk_clamp
         assert clamp.pressure_foot_rise_above_tip_mm == pytest.approx(
-            clamp.pressure_foot_web_mm + clamp.pad_recess_depth_mm
+            clamp.pressure_foot_height_mm - clamp.screw_tip_seat_height_mm
         )
         assert clamp.max_screw_protrusion_mm == pytest.approx(
             clamp.throat_max_opening_mm
@@ -549,9 +549,31 @@ class TestDeskClampSpec:
                 pressure_foot_diameter_mm=20.0, pressure_foot_pad_diameter_mm=20.0
             )
 
-    def test_pressure_foot_bore_must_fit_inside_its_pad(self):
-        with pytest.raises(ValueError, match="bore must be smaller"):
-            DeskClampSpec(pressure_foot_bore_diameter_mm=20.0)
+    def test_pressure_foot_seat_must_fit_inside_its_pad(self):
+        with pytest.raises(ValueError, match="seat must be smaller"):
+            DeskClampSpec(pressure_foot_seat_diameter_mm=20.0)
+
+    @pytest.mark.parametrize("tip", [12.0, 1.0])
+    def test_screw_tip_outside_the_seat_band_rejected(self, tip):
+        """Too wide misses the cone; too narrow bottoms out on the apex flat."""
+        with pytest.raises(ValueError, match="between the seat"):
+            DeskClampSpec(bolt_tip_diameter_mm=tip)
+
+    def test_seat_apex_wider_than_its_mouth_rejected(self):
+        with pytest.raises(ValueError, match="apex flat must be smaller"):
+            DeskClampSpec(pressure_foot_seat_apex_diameter_mm=12.0)
+
+    @pytest.mark.parametrize("angle", [0.0, 180.0, 200.0, -30.0])
+    def test_invalid_seat_angle_rejected(self, angle):
+        with pytest.raises(ValueError, match="included angle"):
+            DeskClampSpec(pressure_foot_seat_angle_deg=angle)
+
+    def test_shallower_seat_cone_gives_a_thinner_foot(self):
+        """Seat depth follows from the mouth diameter and the cone angle."""
+        steep = DeskClampSpec(pressure_foot_seat_angle_deg=90.0)
+        shallow = DeskClampSpec(pressure_foot_seat_angle_deg=140.0)
+        assert shallow.pressure_foot_seat_depth_mm < steep.pressure_foot_seat_depth_mm
+        assert shallow.pressure_foot_height_mm < steep.pressure_foot_height_mm
 
     # ---- Screw length ------------------------------------------------------
 
@@ -571,9 +593,15 @@ class TestDeskClampSpec:
         thick = DeskClampSpec(desk_thickness_range_mm=(25.0, 35.0))
         assert thin.required_bolt_length_mm > thick.required_bolt_length_mm
 
-    def test_boss_not_exceeding_bolt_hole_rejected(self):
-        with pytest.raises(ValueError, match="must exceed the bolt"):
-            DeskClampSpec(knob_boss_diameter_mm=9.0)
+    def test_knob_has_no_bearing_boss(self):
+        """
+        Session D.1d removed it. The U-clamp's knob hangs free below the
+        bottom arm and bears on nothing, so a boss sized for collar friction
+        was modelling a contact that does not exist.
+        """
+        clamp = DEFAULT_HARDWARE.desk_clamp
+        assert not hasattr(clamp, "knob_boss_diameter_mm")
+        assert not hasattr(clamp, "knob_boss_height_mm")
 
     # ---- Physics -----------------------------------------------------------
 
@@ -598,10 +626,34 @@ class TestDeskClampSpec:
         coarse = DeskClampSpec(bolt_thread_pitch_mm=1.50)
         assert coarse.bolt_preload_n(5.0) < fine.bolt_preload_n(5.0)
 
-    def test_larger_boss_wastes_torque_on_collar_friction(self):
-        small = DeskClampSpec(knob_boss_diameter_mm=18.0)
-        large = DeskClampSpec(knob_boss_diameter_mm=40.0)
-        assert large.bolt_preload_n(5.0) < small.bolt_preload_n(5.0)
+    def test_collar_friction_now_acts_at_the_screw_tip(self):
+        """
+        A wider screw tip rides further out in the cone, so its friction lever
+        grows and the same torque yields less preload. This is the term that
+        used to model the knob's boss.
+        """
+        narrow = DeskClampSpec(bolt_tip_diameter_mm=5.0)
+        wide = DeskClampSpec(bolt_tip_diameter_mm=8.0)
+        assert wide.bolt_preload_n(1.0) < narrow.bolt_preload_n(1.0)
+
+    def test_steeper_seat_cone_wedges_harder_and_costs_preload(self):
+        """
+        A cone amplifies contact force by 1/sin(half-angle), so a steeper seat
+        raises friction. Flat (180 deg) would be the no-wedge limit.
+        """
+        steep = DeskClampSpec(pressure_foot_seat_angle_deg=60.0)
+        shallow = DeskClampSpec(pressure_foot_seat_angle_deg=150.0)
+        assert steep.bolt_preload_n(1.0) < shallow.bolt_preload_n(1.0)
+
+    def test_preload_rose_when_the_collar_term_was_corrected(self):
+        """
+        Session D.1d: the old model charged collar friction at the knob boss's
+        radius (about 6.75 mm) for a contact the U-clamp does not have. Moving
+        it to the screw tip roughly halves the friction lever.
+        """
+        clamp = DEFAULT_HARDWARE.desk_clamp
+        assert clamp.bolt_preload_n(1.0) == pytest.approx(516.0, rel=0.02)
+        assert clamp.bolt_preload_n(1.0) > 350.0
 
     def test_negative_torque_rejected(self):
         with pytest.raises(ValueError, match="non-negative"):
@@ -1179,15 +1231,38 @@ class TestPressureFoot:
 
     def test_height_is_the_sum_of_its_layers(self, foot):
         assert foot.height_mm == pytest.approx(
-            foot.bore_depth_mm + foot.web_thickness_mm + foot.pad_recess_depth_mm
+            foot.seat_depth_mm + foot.web_thickness_mm + foot.pad_recess_depth_mm
         )
 
-    def test_bore_is_an_m8_tapping_hole(self, foot):
-        """Smaller than the screw, so the tip cuts its own thread in PETG."""
-        assert foot.bore_diameter_mm < DEFAULT_HARDWARE.desk_clamp.bolt_nominal_diameter_mm
+    def test_seat_is_a_cone_the_screw_tip_pivots_in(self, foot):
+        """
+        Session D.1d replaced a threaded bore with this. A threaded foot turns
+        with the screw, dragging its pad across the desk and moving the
+        friction lever out to the pad's radius.
+        """
+        assert foot.seat_diameter_mm > 2.0 * foot.tip_contact_radius_mm
+        assert 0.0 < foot.seat_angle_deg < 180.0
+        assert foot.seat_depth_mm == pytest.approx(
+            (foot.seat_diameter_mm / 2.0 - foot.seat_apex_diameter_mm / 2.0)
+            / math.tan(math.radians(foot.seat_angle_deg / 2.0))
+        )
 
-    def test_bore_fits_inside_the_pad_recess(self, foot):
-        assert foot.bore_diameter_mm < foot.pad_diameter_mm
+    def test_seat_apex_is_truncated(self, foot):
+        """A true apex is unprintable and tessellates to degenerate triangles."""
+        assert 0.0 < foot.seat_apex_diameter_mm < foot.seat_diameter_mm
+        assert foot.seat_apex_diameter_mm < 2.0 * foot.tip_contact_radius_mm
+
+    def test_screw_tip_seats_partway_down_the_cone(self, foot):
+        """It stops where its edge meets the wall, not at the apex."""
+        assert 0.0 < foot.tip_seat_height_mm < foot.seat_depth_mm
+
+    def test_rise_above_tip_accounts_for_the_seat(self, foot):
+        assert foot.rise_above_tip_mm == pytest.approx(
+            foot.height_mm - foot.tip_seat_height_mm
+        )
+
+    def test_seat_fits_inside_the_pad_recess(self, foot):
+        assert foot.seat_diameter_mm < foot.pad_diameter_mm
 
     def test_foot_spreads_the_load_over_a_bare_tip(self, foot):
         """The reason the part exists at all."""
@@ -1198,8 +1273,10 @@ class TestPressureFoot:
         assert foot.height_mm <= foot.throat_clearance_mm
 
     def test_foot_too_tall_for_the_throat_is_rejected(self, foot):
-        tall = replace(foot, height_mm=foot.throat_clearance_mm + 5.0,
-                       bore_depth_mm=foot.bore_depth_mm + 5.0)
+        # Grow the seat and the height together so the part stays internally
+        # consistent and it is genuinely the throat check that fires.
+        tall = replace(foot, seat_depth_mm=foot.seat_depth_mm + 6.0,
+                       height_mm=foot.height_mm + 6.0)
         with pytest.raises(PressureFootDesignError) as excinfo:
             tall.validate()
         assert excinfo.value.status is DesignStatus.FEATURE_COLLISION
@@ -1216,14 +1293,20 @@ class TestPressureFoot:
             wide.validate()
         assert excinfo.value.status is DesignStatus.INVALID_PARAMETER
 
-    def test_bore_wider_than_the_pad_is_rejected(self, foot):
-        bored = replace(foot, bore_diameter_mm=foot.pad_diameter_mm + 1.0)
+    def test_seat_wider_than_the_pad_is_rejected(self, foot):
+        bored = replace(foot, seat_diameter_mm=foot.pad_diameter_mm + 1.0)
         with pytest.raises(PressureFootDesignError) as excinfo:
             bored.validate()
         assert excinfo.value.status is DesignStatus.FEATURE_COLLISION
 
+    def test_tip_wider_than_the_seat_mouth_is_rejected(self, foot):
+        oversized = replace(foot, tip_contact_radius_mm=foot.seat_diameter_mm)
+        with pytest.raises(PressureFootDesignError) as excinfo:
+            oversized.validate()
+        assert excinfo.value.status is DesignStatus.FEATURE_COLLISION
+
     @pytest.mark.parametrize(
-        "kwargs", [{"diameter_mm": 0.0}, {"bore_depth_mm": -1.0},
+        "kwargs", [{"diameter_mm": 0.0}, {"seat_depth_mm": -1.0},
                    {"web_thickness_mm": 0.0}]
     )
     def test_non_positive_dimensions_rejected(self, foot, kwargs):
@@ -1233,7 +1316,7 @@ class TestPressureFoot:
 
     def test_report_names_the_key_dimensions(self, foot):
         report = foot.report()
-        for heading in ("Screw bore", "Pad recess", "Contact area"):
+        for heading in ("Swivel seat", "Pad recess", "Contact area"):
             assert heading in report
 
 
@@ -1265,14 +1348,11 @@ class TestKnob:
         assert knob.socket_depth_mm < knob.total_height_mm
         assert knob.shank_bore_length_mm > 0.0
 
-    def test_total_height_includes_the_boss(self, knob):
-        assert knob.total_height_mm == pytest.approx(
-            knob.body_thickness_mm + knob.boss_height_mm
-        )
-
-    def test_boss_leaves_a_wall_around_the_bore(self, knob):
-        wall = (knob.boss_diameter_mm - knob.bolt_hole_diameter_mm) / 2.0
-        assert wall >= knob.min_wall_thickness_mm
+    def test_total_height_is_the_body_alone(self, knob):
+        """Session D.1d removed the bearing boss; the knob is a plain disc."""
+        assert knob.total_height_mm == pytest.approx(knob.body_thickness_mm)
+        assert not hasattr(knob, "boss_diameter_mm")
+        assert not hasattr(knob, "boss_height_mm")
 
     def test_flutes_are_evenly_spaced_on_the_rim(self, knob):
         positions = knob.flute_positions
@@ -1280,9 +1360,9 @@ class TestKnob:
         for x, y in positions:
             assert math.hypot(x, y) == pytest.approx(knob.body_diameter_mm / 2.0)
 
-    def test_flutes_bite_into_the_rim_without_reaching_the_boss(self, knob):
+    def test_flutes_bite_into_the_rim_without_reaching_the_bore(self, knob):
         assert knob.grip_min_radius_mm < knob.body_diameter_mm / 2.0
-        assert knob.grip_min_radius_mm > knob.boss_diameter_mm / 2.0
+        assert knob.grip_min_radius_mm > knob.bolt_hole_diameter_mm / 2.0
 
     def test_socket_piercing_the_knob_is_rejected(self, knob):
         pierced = replace(knob, socket_depth_mm=knob.total_height_mm)
@@ -1297,12 +1377,6 @@ class TestKnob:
         with pytest.raises(KnobDesignError) as excinfo:
             bored.validate()
         assert excinfo.value.status is DesignStatus.FEATURE_COLLISION
-
-    def test_thin_boss_is_rejected(self, knob):
-        thin = replace(knob, boss_diameter_mm=knob.bolt_hole_diameter_mm + 1.0)
-        with pytest.raises(KnobDesignError) as excinfo:
-            thin.validate()
-        assert excinfo.value.status is DesignStatus.WALL_TOO_THIN
 
     def test_flutes_cutting_into_the_socket_are_rejected(self, knob):
         deep = replace(knob, flute_radius_mm=knob.body_diameter_mm / 2.0 - 6.0)
@@ -1322,7 +1396,7 @@ class TestKnob:
 
     def test_report_names_the_key_dimensions(self, knob):
         report = knob.report()
-        for heading in ("Hex socket", "Bearing boss", "Grip flutes"):
+        for heading in ("Hex socket", "Shank bore", "Grip flutes"):
             assert heading in report
 
 

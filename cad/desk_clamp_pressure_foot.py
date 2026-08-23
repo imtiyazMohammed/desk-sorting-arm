@@ -11,13 +11,26 @@ What the part does
 A small disc that threads onto the M8 clamp screw's tip and bears on the
 desk's underside. Bottom to top along +Z:
 
-1. **Blind bore** the screw's tip threads into. Sized as an M8 tapping hole so
-   the screw cuts its own thread in PETG.
-2. **Web**, the material carrying the load from the screw's crown into the
+1. **Conical seat** the screw's tip pivots in. The foot rests on the tip
+   rather than threading onto it, so it stays still while the screw turns.
+2. **Web**, the material carrying the load from the seat's apex into the
    pad. Loaded in pure compression, so it does not need a structural
    thickness.
 3. **Pad recess** in the top face, for a glued-in anti-slip rubber disc that
    contacts the desk.
+
+Why it swivels rather than threads on (Session D.1d)
+----------------------------------------------------
+The first version threaded onto the screw's tip. That fails in two ways at
+once: the foot turns with the screw, dragging its rubber pad across the desk
+as you tighten, and the friction that resists tightening then acts at the
+pad's radius instead of the screw's -- roughly halving the preload a given
+hand torque produces. Seated on a cone, the foot is free to stay put while the
+screw turns inside it, and the friction lever shrinks to the tip's own radius.
+
+The foot is not captive: it rests on the tip and will drop off if the assembly
+is inverted. Fit it as the clamp goes on; once the pad touches the desk it
+stays put on its own.
 
 Why it exists
 -------------
@@ -41,7 +54,7 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Optional
 
-from build123d import Align, Cylinder, Part, Pos, export_stl
+from build123d import Align, Cone, Cylinder, Part, Pos, export_stl
 
 from cad._design import DesignRuleError, DesignStatus
 from src.geometry import DEFAULT_HARDWARE, HardwareSpec
@@ -69,11 +82,15 @@ class PressureFootParameters:
 
     diameter_mm: float
     height_mm: float
-    bore_diameter_mm: float
-    bore_depth_mm: float
+    seat_diameter_mm: float
+    seat_apex_diameter_mm: float
+    seat_depth_mm: float
+    seat_angle_deg: float
     web_thickness_mm: float
     pad_diameter_mm: float
     pad_recess_depth_mm: float
+    tip_contact_radius_mm: float
+    tip_seat_height_mm: float
     throat_clearance_mm: float
     min_wall_thickness_mm: float
 
@@ -95,11 +112,15 @@ class PressureFootParameters:
         params = cls(
             diameter_mm=clamp.pressure_foot_diameter_mm,
             height_mm=clamp.pressure_foot_height_mm,
-            bore_diameter_mm=clamp.pressure_foot_bore_diameter_mm,
-            bore_depth_mm=clamp.pressure_foot_bore_depth_mm,
+            seat_diameter_mm=clamp.pressure_foot_seat_diameter_mm,
+            seat_apex_diameter_mm=clamp.pressure_foot_seat_apex_diameter_mm,
+            seat_depth_mm=clamp.pressure_foot_seat_depth_mm,
+            seat_angle_deg=clamp.pressure_foot_seat_angle_deg,
             web_thickness_mm=clamp.pressure_foot_web_mm,
             pad_diameter_mm=clamp.pressure_foot_pad_diameter_mm,
             pad_recess_depth_mm=clamp.pad_recess_depth_mm,
+            tip_contact_radius_mm=clamp.screw_tip_contact_radius_mm,
+            tip_seat_height_mm=clamp.screw_tip_seat_height_mm,
             throat_clearance_mm=clamp.desk_removal_clearance_mm,
             min_wall_thickness_mm=hardware.min_wall_thickness_mm,
         )
@@ -110,13 +131,18 @@ class PressureFootParameters:
 
     @property
     def rise_above_tip_mm(self) -> float:
-        """How far the contact face stands above the screw's tip."""
-        return self.web_thickness_mm + self.pad_recess_depth_mm
+        """How far the contact face stands above the seated screw tip."""
+        return self.height_mm - self.tip_seat_height_mm
 
     @property
     def pad_area_mm2(self) -> float:
         """Contact area of the glued-in rubber disc, in square millimetres."""
         return 3.141592653589793 * (self.pad_diameter_mm / 2.0) ** 2
+
+    @property
+    def seat_wall_thickness_mm(self) -> float:
+        """Material between the seat's mouth and the foot's outer surface."""
+        return (self.diameter_mm - self.seat_diameter_mm) / 2.0
 
     @property
     def bearing_area_ratio(self) -> float:
@@ -137,8 +163,8 @@ class PressureFootParameters:
         for name, value in (
             ("diameter_mm", self.diameter_mm),
             ("height_mm", self.height_mm),
-            ("bore_diameter_mm", self.bore_diameter_mm),
-            ("bore_depth_mm", self.bore_depth_mm),
+            ("seat_diameter_mm", self.seat_diameter_mm),
+            ("seat_depth_mm", self.seat_depth_mm),
             ("web_thickness_mm", self.web_thickness_mm),
             ("pad_diameter_mm", self.pad_diameter_mm),
         ):
@@ -147,13 +173,13 @@ class PressureFootParameters:
                     DesignStatus.INVALID_PARAMETER,
                     f"{name} must be positive, got {value}.",
                 )
-        stack = self.bore_depth_mm + self.web_thickness_mm + self.pad_recess_depth_mm
+        stack = self.seat_depth_mm + self.web_thickness_mm + self.pad_recess_depth_mm
         if abs(stack - self.height_mm) > 1e-9:
             raise PressureFootDesignError(
                 DesignStatus.INVALID_PARAMETER,
                 f"Height {self.height_mm:.2f} mm does not match its parts "
-                f"(bore {self.bore_depth_mm} + web {self.web_thickness_mm} + "
-                f"pad {self.pad_recess_depth_mm} = {stack:.2f} mm).",
+                f"(seat {self.seat_depth_mm:.2f} + web {self.web_thickness_mm} "
+                f"+ pad {self.pad_recess_depth_mm} = {stack:.2f} mm).",
             )
         if self.pad_diameter_mm >= self.diameter_mm:
             raise PressureFootDesignError(
@@ -161,12 +187,20 @@ class PressureFootParameters:
                 f"The pad recess ({self.pad_diameter_mm:.2f} mm) must be "
                 f"smaller than the foot ({self.diameter_mm:.2f} mm).",
             )
-        if self.bore_diameter_mm >= self.pad_diameter_mm:
+        if self.seat_diameter_mm >= self.pad_diameter_mm:
             raise PressureFootDesignError(
                 DesignStatus.FEATURE_COLLISION,
-                f"The bore ({self.bore_diameter_mm:.2f} mm) is not smaller "
+                f"The seat ({self.seat_diameter_mm:.2f} mm) is not smaller "
                 f"than the pad recess ({self.pad_diameter_mm:.2f} mm), so the "
                 "web would have no material.",
+            )
+        if self.tip_contact_radius_mm >= self.seat_diameter_mm / 2.0:
+            raise PressureFootDesignError(
+                DesignStatus.FEATURE_COLLISION,
+                f"The screw tip (radius {self.tip_contact_radius_mm:.2f} mm) is "
+                f"as wide as the seat's mouth "
+                f"({self.seat_diameter_mm / 2.0:.2f} mm radius); it would rest "
+                "on the foot's face rather than seating in the cone.",
             )
         rim = (self.diameter_mm - self.pad_diameter_mm) / 2.0
         if rim < self.min_wall_thickness_mm / 2.0:
@@ -193,8 +227,12 @@ class PressureFootParameters:
             f"-----------------------------------\n"
             f"  Foot                   : {self.diameter_mm:.2f} mm dia x "
             f"{self.height_mm:.2f} mm\n"
-            f"  Screw bore (underside) : {self.bore_diameter_mm:.2f} mm dia x "
-            f"{self.bore_depth_mm:.2f} mm deep\n"
+            f"  Swivel seat (underside): {self.seat_diameter_mm:.2f} mm mouth "
+            f"-> {self.seat_apex_diameter_mm:.2f} mm flat, "
+            f"{self.seat_depth_mm:.2f} mm deep, "
+            f"{self.seat_angle_deg:.0f} deg included\n"
+            f"  Screw tip seats at     : {self.tip_seat_height_mm:.2f} mm "
+            f"(contact radius {self.tip_contact_radius_mm:.2f} mm)\n"
             f"  Web                    : {self.web_thickness_mm:.2f} mm "
             f"(compression only)\n"
             f"  Pad recess (top)       : {self.pad_diameter_mm:.2f} mm dia x "
@@ -234,10 +272,13 @@ def build_pressure_foot(
     part = Cylinder(
         radius=params.diameter_mm / 2.0, height=params.height_mm, align=bottom
     )
-    # Blind bore for the screw's tip, opening downward.
-    part -= Cylinder(
-        radius=params.bore_diameter_mm / 2.0,
-        height=params.bore_depth_mm,
+    # Conical swivel seat, opening downward: mouth at the underside, apex up.
+    # Truncated: a true apex is unprintable and tessellates to degenerate
+    # triangles. The tip contacts the wall well above it, so the flat is free.
+    part -= Cone(
+        bottom_radius=params.seat_diameter_mm / 2.0,
+        top_radius=params.seat_apex_diameter_mm / 2.0,
+        height=params.seat_depth_mm,
         align=bottom,
     )
     # Anti-slip pad recess in the top face.

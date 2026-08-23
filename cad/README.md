@@ -166,27 +166,36 @@ always regenerate.
 
 | | |
 |---|---|
-| Foot | Ø24.00 × 10.00 mm |
-| Screw bore (underside) | Ø7.00 × 6.00 mm deep — an M8 tapping hole |
+| Foot | Ø24.00 × 6.02 mm |
+| Swivel seat (underside) | Ø9.00 mouth → Ø2.00 flat, 2.02 mm deep, 120° included |
 | Web | 2.00 mm (compression only) |
 | Pad recess (top) | Ø20.00 × 2.00 mm deep |
 | Contact area | 314 mm², **6.2× a bare M8 tip** |
 
-Threads onto the screw's tip and bears on the desk's underside. Its height is
-not a free choice: at the thickest supported desk the throat leaves exactly
-10 mm between the bottom arm and the desk, and the foot has to fit inside that.
+Rests on the screw's tip and bears on the desk's underside. Its height is not a
+free choice: at the thickest supported desk the throat leaves exactly 10 mm
+between the bottom arm and the desk, and the foot has to fit inside that.
 `validate()` enforces it.
 
-The bore is a tapping hole, so the screw cuts its own thread in PETG. If a test
-print comes out loose, epoxy it — the foot carries pure compression.
+**Revised in D.1d: it swivels, it does not thread on.** The first version had a
+tapping bore, so the foot turned with the screw. That drags the rubber pad
+across the desk as you tighten — scuffing the finish — and moves the friction
+that resists tightening out to the pad's radius, which roughly halves the
+preload a given hand torque produces. Seated on a truncated cone the foot is
+free to stay still while the screw turns inside it. The cone's apex is
+truncated because a sharp internal point is unprintable and tessellates to
+degenerate triangles.
+
+The foot is not captive: it rests on the tip and drops off if the assembly is
+inverted. Fit it as the clamp goes on; once the pad meets the desk it stays put.
 
 ### `desk_clamp_knob.py`
 
 | | |
 |---|---|
 | Body | Ø50.00 × 20.00 mm |
-| Bearing boss | Ø18.00 × 2.00 mm |
 | Hex socket (top) | 13.10 mm across flats × 7.80 mm deep |
+| Shank bore | Ø9.00 × 12.20 mm |
 | Grip flutes | 12 × Ø8.00 mm scallops |
 
 **Why it stayed 50 mm.** The knob was scheduled to shrink to 30 mm, on the
@@ -196,11 +205,11 @@ That limit belonged to D.1b's cantilever wing. The U-clamp's bottom arm takes
 there is nothing left to protect against, while shrinking would have cut the
 grip margin from 2.39× to 1.43×. The shrink was cancelled.
 
-**On the bearing boss.** It was added in D.1b, where the knob bore against the
-upper jaw and collar friction there ate much of the hand torque. In the
-U-clamp the knob does **not** touch the clamp — see the assembly preview — so
-that contact no longer exists. The boss is currently inert; see *Known future
-work*.
+**The bearing boss is gone (D.1d).** It was added in D.1b, where the knob bore
+against the upper jaw and collar friction there ate much of the hand torque. In
+the U-clamp the knob touches nothing but the screw — the assembly preview shows
+it hanging 28 mm below the bottom arm — so the boss was inert material and the
+friction term it justified was modelling a contact that does not exist.
 
 Print **socket-face down**: no support needed and the gripping surfaces come
 out crisp.
@@ -209,14 +218,24 @@ out crisp.
 
 ## Clamp mechanics
 
-| | |
-|---|---|
-| Arm tipping moment (worst case) | 6.76 N·m |
-| Tipping lever (top arm edge → screw) | 46.00 mm |
-| Preload needed | **147 N** (0.42 N·m at the knob) |
-| Hand torque available, Ø50 knob | 1.00 N·m → 350 N |
-| **Grip margin** | **2.39×** |
-| Bottom arm structural limit | 11.62 N·m |
+| | | revised in D.1d |
+|---|---|---|
+| Arm tipping moment (worst case) | 6.76 N·m | unchanged |
+| Tipping lever (top arm edge → screw) | 46.00 mm | unchanged |
+| Preload needed | **147 N** | unchanged (0.28 N·m at the knob, was 0.42) |
+| Hand torque available, Ø50 knob | 1.00 N·m | unchanged |
+| Preload it produces | **516 N** | ← was 350 N |
+| **Grip margin** | **3.51×** | ← was 2.39× |
+| Bottom arm structural limit | 7.89 N·m | ← was 11.62 N·m |
+
+**Why those three numbers moved.** The friction model charged collar friction
+at the knob boss's radius, about 6.75 mm, for a contact the U-clamp does not
+have. D.1d moved it to where the rubbing actually happens — the screw's tip
+turning in the pressure foot's cone, contact radius 3.20 mm — which roughly
+halves the friction lever and so raises the preload a given torque produces.
+The structural limit falls in the same proportion, because it is expressed as a
+*torque* and the same torque now delivers more force; the *force* the bottom
+arm can carry is unchanged at 4834 N. Hand torque still cannot reach it.
 
 **The U-profile inverts the old design's weakness.** D.1b's side wing yielded
 at 3.9 N·m — below what a hand could apply — so `cad/README.md` had to carry a
@@ -303,8 +322,9 @@ thread friction.
 ### 4. Fit the knob and the foot to the screw
 
 Press the M8 × 70 screw's hex head into the knob's socket until it bottoms out,
-7.80 mm down. Thread the pressure foot onto the other end — the tip cuts its own
-thread in the Ø7 bore.
+7.80 mm down. The pressure foot simply **rests** on the other end: its conical
+seat centres on the screw's tip. It is not captive — hold it in place while
+positioning the clamp, and it stays put once the pad meets the desk.
 
 ### 5. Thread the screw up through the bottom arm
 
@@ -421,15 +441,6 @@ disagreement and fails if a future change pushes the corner past 89%.
 - **`BaseStack` is provisional.** The 6 mm turntable plate and 24 mm shoulder
   bracket rise are estimates. Sessions D.2 and D.3 replace them; the turret
   height then follows automatically.
-- **The knob's collar friction is mis-modelled — conservatively.**
-  `DeskClampSpec.torque_to_preload_factor_m` still includes a collar term for
-  the knob's boss bearing on the clamp, which was true in D.1b but is not true
-  here: the assembly preview shows the knob hanging clear below the bottom arm.
-  The real rubbing interface is the screw's tip against the pressure foot, at a
-  much smaller radius. The current model therefore *understates* preload by
-  roughly a third (350 N rather than ~530 N at 1.00 N·m), so every margin
-  quoted above is pessimistic and nothing is unsafe — but the boss serves no
-  purpose as modelled and the term should be re-derived.
 - **The stress model is a hand calculation.** A rectangular-section cantilever
   with a point load is a reasonable first approximation, but it ignores the
   spine's restraint and PETG's anisotropy between layers. If the clamp is ever
