@@ -369,6 +369,13 @@ class BearingSpec:
     #: SMALLER than outer_diameter_mm so the outer race grips.
     press_fit_interference_mm: float = 0.10
 
+    #: How far the bearing stands above the face its seat is cut into, in mm.
+    #: Must be positive: the part above rides on the bearing's inner race, and
+    #: a flush bearing would let it scrub the printed face instead. It also
+    #: occupies real height in the base stack, so it is kept here rather than
+    #: as a modelling constant inside cad/ -- see HardwareSpec.pedestal_height_mm.
+    proud_mm: float = 0.50
+
     def __post_init__(self) -> None:
         if not 0.0 < self.bore_diameter_mm < self.outer_diameter_mm:
             raise ValueError(
@@ -381,11 +388,22 @@ class BearingSpec:
                 f"BearingSpec {self.name}: width_mm must be positive, "
                 f"got {self.width_mm}."
             )
+        if not 0.0 < self.proud_mm < self.width_mm:
+            raise ValueError(
+                f"BearingSpec {self.name}: proud_mm ({self.proud_mm}) must be "
+                f"positive and less than width_mm ({self.width_mm}); otherwise "
+                "there is no seat left to press the outer race into."
+            )
 
     @property
     def seat_diameter_mm(self) -> float:
         """Diameter of the pocket the outer race presses into."""
         return self.outer_diameter_mm - self.press_fit_interference_mm
+
+    @property
+    def seat_depth_mm(self) -> float:
+        """Depth of that pocket: the bearing's width less what stands proud."""
+        return self.width_mm - self.proud_mm
 
 
 @dataclass(frozen=True)
@@ -425,11 +443,19 @@ class BaseStack:
     Vertical budget between the desk surface and the shoulder pivot.
 
     ``ArmGeometry.base_height_mm`` (100 mm) is defined as desk surface ->
-    shoulder pivot. The base pedestal is only the bottom of that stack: a yaw
-    turntable plate and a shoulder bracket sit on top of it. Splitting the
-    budget explicitly here keeps FK's z = base_height_mm shoulder pivot exact
-    by construction, instead of discovering after printing that the real
-    pivot ended up 30 mm high.
+    shoulder pivot. The base pedestal is only the bottom of that stack. Above
+    its top face sit, in order:
+
+    1. the part of the thrust bearing standing proud of that face
+       (``BearingSpec.proud_mm``, accounted for separately because it belongs
+       to the bearing, not to a printed part),
+    2. the yaw turntable plate, and
+    3. the shoulder bracket.
+
+    Splitting the budget explicitly keeps FK's z = base_height_mm shoulder
+    pivot exact by construction, instead of discovering after printing that
+    the real pivot ended up 30 mm high. The pedestal's height is whatever is
+    left over -- see :meth:`HardwareSpec.pedestal_height_mm`.
 
     Both components are PROVISIONAL. They are refined in Sessions D.2 (yaw
     turntable) and D.3 (shoulder bracket), when those parts actually exist.
@@ -984,25 +1010,53 @@ class HardwareSpec:
                 f"{self.min_wall_thickness_mm}."
             )
 
+    @property
+    def above_pedestal_allowance_mm(self) -> float:
+        """
+        Everything between the pedestal's top face and the shoulder pivot, in mm.
+
+        The bearing's proud height plus the turntable and bracket budget. Kept
+        as one accessor so the pedestal height and the assembly preview cannot
+        disagree about what occupies that space.
+        """
+        return self.thrust_bearing.proud_mm + self.base_stack.allowance_mm
+
+    def shoulder_pivot_z_mm(self, arm: Optional[ArmGeometry] = None) -> float:
+        """
+        Height of the shoulder pivot above the desk surface, in mm.
+
+        This is ``ArmGeometry.base_height_mm`` by definition; the method exists
+        so the CAD can assert that its own stack actually lands there rather
+        than assuming it.
+        """
+        arm = DEFAULT_ARM if arm is None else arm
+        return float(arm.base_height_mm)
+
     def pedestal_height_mm(self, arm: Optional[ArmGeometry] = None) -> float:
         """
         Height of the base pedestal alone, in mm.
 
-        Derived as ``arm.base_height_mm - base_stack.allowance_mm`` so that
-        the pedestal plus everything above it lands the shoulder pivot at
-        exactly ``base_height_mm``.
+        Derived as ``base_height_mm`` less everything stacked above the
+        pedestal's top face -- the bearing's proud height, the yaw turntable
+        and the shoulder bracket -- so the pedestal plus that stack lands the
+        shoulder pivot at exactly ``base_height_mm``.
+
+        The bearing's proud height was folded in during Session D.1d. Leaving
+        it out had put the pivot 0.5 mm high: the turntable rides the bearing's
+        inner race, which stands above the turret's top face rather than flush
+        with it.
 
         Raises
         ------
         ValueError
-            If the stack allowance consumes the entire base height, which
-            would call for a pedestal of zero or negative height.
+            If the stack consumes the entire base height, which would call for
+            a pedestal of zero or negative height.
         """
         arm = DEFAULT_ARM if arm is None else arm
-        height = arm.base_height_mm - self.base_stack.allowance_mm
+        height = arm.base_height_mm - self.above_pedestal_allowance_mm
         if height <= 0.0:
             raise ValueError(
-                f"Base stack allowance ({self.base_stack.allowance_mm:.1f} mm) "
+                f"Base stack ({self.above_pedestal_allowance_mm:.1f} mm) "
                 f"meets or exceeds base_height_mm ({arm.base_height_mm:.1f} mm); "
                 "the pedestal would have non-positive height. Either shorten "
                 "the turntable/bracket budget or raise base_height_mm."
@@ -1051,6 +1105,7 @@ class HardwareSpec:
             f"{clamp.bolt_length_mm:.0f} mm (needs "
             f"{clamp.required_bolt_length_mm:.1f} mm)\n"
             f"  Base height budget   : {arm.base_height_mm:.1f} mm total\n"
+            f"    bearing proud      : {self.thrust_bearing.proud_mm:.1f} mm\n"
             f"    turntable plate    : "
             f"{self.base_stack.turntable_plate_thickness_mm:.1f} mm\n"
             f"    shoulder bracket   : "

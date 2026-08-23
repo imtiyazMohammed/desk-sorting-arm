@@ -103,6 +103,13 @@ LINK_RADII_MM = (14.0, 11.0, 8.0)
 #: Radius of the marker sphere at the tool centre point, in mm.
 TCP_MARKER_RADIUS_MM = 12.0
 
+#: Shoulder bracket placeholder footprint, as a fraction of the turntable's
+#: diameter. Both placeholders are sized off the turret they stand on rather
+#: than given fixed numbers: they stand in for parts Sessions D.2 and D.3 have
+#: yet to design, and inventing dimensions for them would imply decisions that
+#: have not been made.
+BRACKET_PLACEHOLDER_FRACTION = 0.75
+
 
 @dataclass(frozen=True)
 class AssemblyPart:
@@ -148,6 +155,8 @@ class Assembly:
     parts: Tuple[AssemblyPart, ...]
     desk_thickness_mm: float
     yaw_axis_xy_mm: Tuple[float, float]
+    servo_shaft_output_z_mm: float
+    shoulder_pivot_z_mm: float
     clamp_footprint_mm: Tuple[float, float]
     knob_drop_below_arm_mm: float
 
@@ -194,6 +203,8 @@ class Assembly:
             f"({self.yaw_axis_xy_mm[0]:.1f}, {self.yaw_axis_xy_mm[1]:.1f}) mm",
             f"  Clamp footprint        : {self.clamp_footprint_mm[0]:.1f} (X) x "
             f"{self.clamp_footprint_mm[1]:.1f} (Y) mm on the desk surface",
+            f"  Servo shaft output     : z = {self.servo_shaft_output_z_mm:.1f} mm",
+            f"  Shoulder pivot         : z = {self.shoulder_pivot_z_mm:.1f} mm",
             f"  Knob hangs below arm   : {self.knob_drop_below_arm_mm:.1f} mm",
             "",
             "  Parts",
@@ -306,6 +317,32 @@ def build_assembly(
     )
     knob_drop = pedestal_params.bottom_arm_bottom_z_mm - knob_bearing_z
 
+    # ---- The base stack between the turret and the shoulder pivot --------
+    # These two parts are designed in Sessions D.2 and D.3 and do not exist
+    # yet, but they occupy real height: BaseStack budgets for them, and
+    # pedestal_height_mm is what is left over. Drawing them as placeholders is
+    # what stops the arm appearing to float above the turret -- the gap is
+    # hardware, not an error in the base frame.
+    turntable_diameter = (
+        pedestal_params.turret_x_max_mm - pedestal_params.turret_x_min_mm
+    )
+    turntable_bottom_z = pedestal_params.bearing_top_z_mm
+    turntable_solid = Pos(base_x, base_y, turntable_bottom_z) * Cylinder(
+        radius=turntable_diameter / 2.0,
+        height=hardware.base_stack.turntable_plate_thickness_mm,
+        align=bottom,
+    )
+    bracket_side = turntable_diameter * BRACKET_PLACEHOLDER_FRACTION
+    bracket_bottom_z = (
+        turntable_bottom_z + hardware.base_stack.turntable_plate_thickness_mm
+    )
+    bracket_solid = Pos(base_x, base_y, bracket_bottom_z) * Box(
+        bracket_side,
+        bracket_side,
+        hardware.base_stack.shoulder_bracket_rise_mm,
+        align=bottom,
+    )
+
     # ---- Arm placeholders at the zero pose --------------------------------
     # All joints at zero puts the arm horizontal along the base frame's +X,
     # which is the desk's +Y. Links are drawn end to end from the shoulder.
@@ -351,6 +388,12 @@ def build_assembly(
         AssemblyPart("pressure_foot", foot_solid, "#8c8c8c"),
         AssemblyPart("clamp_screw", screw_solid, "#4d4d4d", printed=False),
         AssemblyPart("knob", knob_solid, "#c49a6c"),
+        AssemblyPart(
+            "yaw turntable (D.2)", turntable_solid, "#a0a0a0", printed=False
+        ),
+        AssemblyPart(
+            "shoulder bracket (D.3)", bracket_solid, "#8f8f8f", printed=False
+        ),
         *links,
         tcp,
     )
@@ -358,6 +401,8 @@ def build_assembly(
         parts=parts,
         desk_thickness_mm=float(desk_thickness_mm),
         yaw_axis_xy_mm=(float(base_x), float(base_y)),
+        servo_shaft_output_z_mm=float(pedestal_params.servo_shaft_output_z_mm),
+        shoulder_pivot_z_mm=float(arm.base_height_mm),
         clamp_footprint_mm=(
             float(clamp_box.max.X - clamp_box.min.X),
             float(clamp_box.max.Y - clamp_box.min.Y),

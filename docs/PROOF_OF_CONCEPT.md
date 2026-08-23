@@ -32,9 +32,34 @@ Phase A **explicitly excludes**: any physical hardware, computer vision, camera 
 | L1 (upper arm) | 400 mm | Longest link — dominates leverage but needed for elbow-up geometry. |
 | L2 (forearm) | 350 mm | Standard 0.875× L1 proportion. |
 | L3 (wrist → TCP) | 200 mm | Includes gripper body length. |
-| Base height | 100 mm | Clears typical desktop clutter (books, mouse). |
+| Base height | 100 mm | Clears typical desktop clutter (books, mouse). **Since D.1c this is a budget, not just a clearance** — see below. |
 | Total reach L1+L2+L3 | 950 mm | Exceeds 848.5 mm worst-case corner by 12%. |
 | Servo dynamic derating | 60 % of no-load speed | Empirical safety factor for loaded motion. |
+
+### 2.0 Base Height as a Budget (added D.1d)
+
+`base_height_mm` began life in Phase A as a single design input: 100 mm of
+clearance over desk clutter. Once the D.1c U-clamp existed it also became a
+**budget that the hardware has to add up to**, measured from the desk surface
+to the shoulder pivot:
+
+| Component | Height | Source |
+|---|---|---|
+| U-clamp pedestal, desk surface → turret top | 69.5 mm | derived (whatever is left) |
+| 608ZZ bearing standing proud of the turret | 0.5 mm | `BearingSpec.proud_mm` |
+| Yaw turntable plate | 6.0 mm | `BaseStack` (provisional, Session D.2) |
+| Shoulder bracket rise | 24.0 mm | `BaseStack` (provisional, Session D.3) |
+| **Total = shoulder pivot** | **100.0 mm** | `ArmGeometry.base_height_mm` |
+
+The pedestal's height is the *dependent* term: it is `base_height_mm` less
+everything stacked above it. That is why the servo shaft output sits at
+z = 63.0 mm and the turret top at 69.5 mm, both well below the 100 mm pivot —
+the 37 mm between them is occupied hardware, not slack.
+
+Session D.1d folded the bearing's 0.5 mm proud height into this budget. It had
+been treated as a modelling constant inside `cad/`, which left the shoulder
+pivot 0.5 mm high: the turntable rides the bearing's inner race, which stands
+above the turret's top face rather than flush with it.
 
 ### 2.1 Reach Sizing — the Math
 

@@ -326,16 +326,59 @@ class TestHardwareSpecs:
         with pytest.raises(ValueError, match="must be positive"):
             BaseStack(**kwargs)
 
-    def test_pedestal_height_is_base_height_minus_allowance(self):
-        expected = DEFAULT_ARM.base_height_mm - DEFAULT_HARDWARE.base_stack.allowance_mm
+    def test_pedestal_height_is_base_height_minus_everything_above_it(self):
+        expected = (
+            DEFAULT_ARM.base_height_mm
+            - DEFAULT_HARDWARE.above_pedestal_allowance_mm
+        )
         assert DEFAULT_HARDWARE.pedestal_height_mm() == pytest.approx(expected)
-        assert DEFAULT_HARDWARE.pedestal_height_mm() == pytest.approx(70.0)
+        assert DEFAULT_HARDWARE.pedestal_height_mm() == pytest.approx(69.5)
+
+    def test_base_stack_accounts_for_the_bearings_proud_height(self):
+        """
+        Session D.1d fix: the turntable rides the bearing's inner race, which
+        stands above the turret's top face rather than flush with it. Leaving
+        that 0.5 mm out of the budget had put the shoulder pivot 0.5 mm high.
+        """
+        hardware = DEFAULT_HARDWARE
+        assert hardware.above_pedestal_allowance_mm == pytest.approx(
+            hardware.thrust_bearing.proud_mm + hardware.base_stack.allowance_mm
+        )
+        assert hardware.above_pedestal_allowance_mm > hardware.base_stack.allowance_mm
+
+    def test_the_base_stack_closes_exactly_on_the_shoulder_pivot(self):
+        """
+        The whole point of budgeting the stack: turret top plus everything
+        above it must land on base_height_mm to the millimetre, or FK's
+        shoulder pivot is wrong by the difference.
+        """
+        hardware = DEFAULT_HARDWARE
+        total = (
+            hardware.pedestal_height_mm()
+            + hardware.thrust_bearing.proud_mm
+            + hardware.base_stack.turntable_plate_thickness_mm
+            + hardware.base_stack.shoulder_bracket_rise_mm
+        )
+        assert total == pytest.approx(DEFAULT_ARM.base_height_mm, abs=1e-9)
+        assert total == pytest.approx(hardware.shoulder_pivot_z_mm(), abs=1e-9)
+
+    def test_bearing_seat_depth_leaves_the_bearing_proud(self):
+        bearing = DEFAULT_HARDWARE.thrust_bearing
+        assert bearing.seat_depth_mm == pytest.approx(
+            bearing.width_mm - bearing.proud_mm
+        )
+        assert bearing.seat_depth_mm < bearing.width_mm
+
+    @pytest.mark.parametrize("proud", [0.0, -0.5, 7.0, 9.0])
+    def test_invalid_bearing_proud_rejected(self, proud):
+        with pytest.raises(ValueError, match="proud_mm"):
+            BearingSpec(proud_mm=proud)
 
     def test_pedestal_height_tracks_arm_geometry(self):
         """Raising base_height_mm must lengthen the pedestal, not something else."""
         taller = ArmGeometry(base_height_mm=150.0)
         assert DEFAULT_HARDWARE.pedestal_height_mm(taller) == pytest.approx(
-            150.0 - DEFAULT_HARDWARE.base_stack.allowance_mm
+            150.0 - DEFAULT_HARDWARE.above_pedestal_allowance_mm
         )
 
     def test_stack_allowance_exceeding_base_height_rejected(self):
@@ -709,11 +752,11 @@ class TestParameterDerivation:
         assert params.turret_top_z_mm == pytest.approx(
             DEFAULT_HARDWARE.pedestal_height_mm(DEFAULT_ARM)
         )
-        assert params.turret_top_z_mm == pytest.approx(70.0)
+        assert params.turret_top_z_mm == pytest.approx(69.5)
 
     def test_taller_base_height_gives_a_taller_turret(self):
         taller = PedestalParameters.from_geometry(arm=ArmGeometry(base_height_mm=150.0))
-        assert taller.turret_top_z_mm == pytest.approx(120.0)
+        assert taller.turret_top_z_mm == pytest.approx(119.5)
 
     def test_desk_seating_plane_matches_the_shaft_offset(self, params):
         """The desk seats one shaft-offset outboard of the yaw axis."""
@@ -759,7 +802,7 @@ class TestParameterDerivation:
         assert params.overall_height_mm == pytest.approx(
             params.turret_top_z_mm - params.bottom_arm_bottom_z_mm
         )
-        assert params.overall_height_mm == pytest.approx(130.0)
+        assert params.overall_height_mm == pytest.approx(129.5)
 
     def test_cavity_is_the_servo_body_plus_clearance(self, params):
         servo = DEFAULT_HARDWARE.base_yaw_servo
@@ -829,6 +872,39 @@ class TestParameterDerivation:
             bearing.seat_diameter_mm
         )
 
+    def test_servo_shaft_output_is_the_bearing_seat_floor(self, params):
+        """
+        Where the yaw drive actually emerges. Exposed as a property so the
+        preview and the tests read the number the solid was cut from, rather
+        than each recomputing it and drifting apart.
+        """
+        assert params.servo_shaft_output_z_mm == pytest.approx(
+            params.turret_top_z_mm - params.bearing_seat_depth_mm
+        )
+        assert params.servo_shaft_output_z_mm == pytest.approx(63.0)
+
+    def test_shaft_output_sits_below_the_shoulder_pivot(self, params):
+        """
+        The gap between them is the base stack, not an error.
+
+        The brief for D.1d assumed the shaft output was above 100 mm and that
+        base_height_mm needed raising to match. It is at 63 mm: the 37 mm to
+        the pivot is the bearing, the yaw turntable and the shoulder bracket,
+        none of which is designed yet.
+        """
+        assert params.servo_shaft_output_z_mm < DEFAULT_ARM.base_height_mm
+        assert params.turret_top_z_mm < DEFAULT_ARM.base_height_mm
+
+    def test_bearing_top_is_the_turntable_datum(self, params):
+        """The turntable rides the inner race, so the bearing's top is the datum."""
+        assert params.bearing_top_z_mm == pytest.approx(
+            params.turret_top_z_mm + params.bearing_proud_mm
+        )
+        assert params.bearing_top_z_mm == pytest.approx(70.0)
+        assert params.bearing_top_z_mm + DEFAULT_HARDWARE.base_stack.allowance_mm == (
+            pytest.approx(DEFAULT_ARM.base_height_mm)
+        )
+
     def test_bearing_stands_proud_of_the_turret_top(self, params):
         """The turntable must ride the inner race, not the printed face."""
         bearing = DEFAULT_HARDWARE.thrust_bearing
@@ -844,8 +920,8 @@ class TestParameterDerivation:
         assert params.cavity_body_span_y_mm == pytest.approx(40.5)
         assert params.cavity_ear_span_y_mm == pytest.approx(54.5)
         assert params.cavity_x_span_mm == pytest.approx(20.5)
-        assert params.ear_shelf_z_mm == pytest.approx(49.5)
-        assert params.cavity_top_z_mm == pytest.approx(59.5)
+        assert params.ear_shelf_z_mm == pytest.approx(49.0)
+        assert params.cavity_top_z_mm == pytest.approx(59.0)
         assert params.bearing_seat_diameter_mm == pytest.approx(21.9)
 
     def test_pads_flank_the_cavity_opening(self, params):
@@ -1055,11 +1131,6 @@ class TestDesignRuleChecks:
         )
         with pytest.raises(PedestalDesignError) as excinfo:
             wide.validate()
-        assert excinfo.value.status is DesignStatus.INVALID_PARAMETER
-
-    def test_bearing_proud_beyond_its_width_is_rejected(self):
-        with pytest.raises(PedestalDesignError) as excinfo:
-            PedestalParameters.from_geometry(bearing_proud_mm=99.0)
         assert excinfo.value.status is DesignStatus.INVALID_PARAMETER
 
     @pytest.mark.parametrize(
@@ -1597,6 +1668,57 @@ class TestAssemblyPreview:
                 f"{name} overlaps the pedestal by {volume:.3f} mm3"
             )
 
+    def test_base_stack_placeholders_fill_the_gap_to_the_shoulder(self, assembly):
+        """
+        The D.1c preview showed L1 apparently floating above the turret. It was
+        not a base-frame error: the 30.5 mm between the turret's top face and
+        the shoulder pivot is the bearing, the yaw turntable and the shoulder
+        bracket, none of which existed to be drawn. With placeholders in the
+        scene the stack is continuous, and this test keeps it that way.
+        """
+        params = PedestalParameters.from_geometry()
+        turntable = assembly.by_name("yaw turntable (D.2)").solid.bounding_box()
+        bracket = assembly.by_name("shoulder bracket (D.3)").solid.bounding_box()
+
+        # Turntable rides the bearing's upper face, not the turret's.
+        assert turntable.min.Z == pytest.approx(params.bearing_top_z_mm, abs=1e-6)
+        # Bracket stands on the turntable, with no gap between them.
+        assert bracket.min.Z == pytest.approx(turntable.max.Z, abs=1e-6)
+        # And its top lands exactly on the shoulder pivot.
+        assert bracket.max.Z == pytest.approx(DEFAULT_ARM.base_height_mm, abs=1e-6)
+
+    def test_nothing_floats_between_the_turret_and_the_shoulder(self, assembly):
+        """Every interface in the base stack touches the next, to the micron."""
+        params = PedestalParameters.from_geometry()
+        boundaries = [
+            params.turret_top_z_mm,
+            params.bearing_top_z_mm,
+            assembly.by_name("yaw turntable (D.2)").solid.bounding_box().max.Z,
+            assembly.by_name("shoulder bracket (D.3)").solid.bounding_box().max.Z,
+        ]
+        assert boundaries == sorted(boundaries)
+        assert boundaries[-1] == pytest.approx(assembly.shoulder_pivot_z_mm, abs=1e-6)
+
+    def test_stack_placeholders_sit_on_the_turret_not_over_it(self, assembly):
+        """
+        Sized from the turret they stand on. They stand in for parts D.2 and
+        D.3 have yet to design, so inventing dimensions would imply decisions
+        nobody has made.
+        """
+        params = PedestalParameters.from_geometry()
+        turret_span = params.turret_x_max_mm - params.turret_x_min_mm
+        turntable = assembly.by_name("yaw turntable (D.2)").solid.bounding_box()
+        assert turntable.max.X - turntable.min.X <= turret_span + 1e-6
+
+    def test_assembly_reports_the_shaft_output_height(self, assembly):
+        params = PedestalParameters.from_geometry()
+        assert assembly.servo_shaft_output_z_mm == pytest.approx(
+            params.servo_shaft_output_z_mm
+        )
+        assert assembly.shoulder_pivot_z_mm == pytest.approx(
+            DEFAULT_ARM.base_height_mm
+        )
+
     def test_arm_links_clear_the_turret_vertically(self, assembly):
         """The margin, not just the absence of contact."""
         pedestal_top = assembly.by_name("base_pedestal").solid.bounding_box().max.Z
@@ -1654,6 +1776,8 @@ class TestAssemblyPreview:
     def test_scenery_is_excluded_from_the_print_estimate(self, assembly):
         """The desk and the arm placeholders are not parts we make."""
         printed = {part.name for part in assembly.printed_parts}
+        # The D.2/D.3 placeholders are excluded too: they will be printed, but
+        # their real volume is unknown, so counting them would invent a figure.
         assert printed == {"base_pedestal", "pressure_foot", "knob"}
         assert assembly.estimated_print_mass_g > 0.0
 

@@ -164,6 +164,7 @@ class PedestalParameters:
     shaft_bore_diameter_mm: float
     bearing_seat_diameter_mm: float
     bearing_seat_depth_mm: float
+    bearing_proud_mm: float
 
     # ---- Anti-slip pads on the top arm's underside ------------------------
     pad_recess_depth_mm: float
@@ -199,7 +200,6 @@ class PedestalParameters:
         arm: Optional[ArmGeometry] = None,
         hardware: Optional[HardwareSpec] = None,
         *,
-        bearing_proud_mm: float = 0.5,
         ear_top_offset_from_body_top_mm: float = 10.0,
         cable_slot_width_mm: float = 8.0,
         cable_slot_height_mm: float = 5.0,
@@ -213,10 +213,6 @@ class PedestalParameters:
         arm, hardware:
             Sources of truth. Default to ``DEFAULT_ARM`` / ``DEFAULT_HARDWARE``;
             injectable so tests can vary the design without touching globals.
-        bearing_proud_mm:
-            How far the bearing stands above the turret's top face. Must be
-            positive, or the yaw turntable rubs the printed face instead of
-            turning on the bearing's inner race.
         ear_top_offset_from_body_top_mm:
             Distance from the top of the servo body down to the top of its
             mounting ears. UNVERIFIED placeholder -- see the module warning.
@@ -241,7 +237,6 @@ class PedestalParameters:
         wall = hardware.min_wall_thickness_mm
 
         for name, value in (
-            ("bearing_proud_mm", bearing_proud_mm),
             ("ear_top_offset_from_body_top_mm", ear_top_offset_from_body_top_mm),
             ("cable_slot_width_mm", cable_slot_width_mm),
             ("cable_slot_height_mm", cable_slot_height_mm),
@@ -252,21 +247,16 @@ class PedestalParameters:
                     DesignStatus.INVALID_PARAMETER,
                     f"{name} must be positive, got {value}.",
                 )
-        if bearing_proud_mm >= bearing.width_mm:
-            raise PedestalDesignError(
-                DesignStatus.INVALID_PARAMETER,
-                f"bearing_proud_mm ({bearing_proud_mm}) must be less than the "
-                f"bearing width ({bearing.width_mm}); otherwise there is no "
-                "seat left to press the outer race into.",
-            )
-
         # ---- Vertical layout, resolved from the turret's top face down ----
         try:
             turret_top_z = hardware.pedestal_height_mm(arm)
         except ValueError as exc:
             raise PedestalDesignError(DesignStatus.NEGATIVE_HEIGHT, str(exc)) from exc
 
-        seat_depth = bearing.width_mm - bearing_proud_mm
+        # The bearing's proud height is already subtracted from the pedestal
+        # budget by HardwareSpec.pedestal_height_mm, so the seat depth follows
+        # from the same single source rather than a local constant.
+        seat_depth = bearing.seat_depth_mm
         seat_bottom_z = turret_top_z - seat_depth
         # The servo's output boss must reach up to the underside of the
         # bearing, so the body top sits one boss-height below the seat floor.
@@ -343,6 +333,7 @@ class PedestalParameters:
             shaft_bore_diameter_mm=servo.shaft_boss_diameter_mm + 2.0 * clearance,
             bearing_seat_diameter_mm=seat_diameter,
             bearing_seat_depth_mm=seat_depth,
+            bearing_proud_mm=bearing.proud_mm,
             pad_recess_depth_mm=clamp.pad_recess_depth_mm,
             pad_edge_margin_mm=clamp.pad_edge_margin_mm,
             bolt_axis_x_mm=bolt_axis_x,
@@ -396,6 +387,29 @@ class PedestalParameters:
     def overall_height_mm(self) -> float:
         """Full printed Z extent, turret top to bottom arm underside."""
         return self.turret_top_z_mm - self.bottom_arm_bottom_z_mm
+
+    @property
+    def servo_shaft_output_z_mm(self) -> float:
+        """
+        Height of the servo's output shaft crown above the desk surface, in mm.
+
+        This is where the yaw drive actually emerges: the top of the shaft
+        boss, level with the bearing seat's floor. Exposed as a property so
+        the assembly preview and the tests read the same number the solid was
+        cut from, and it cannot drift from the geometry.
+        """
+        return self.turret_top_z_mm - self.bearing_seat_depth_mm
+
+    @property
+    def bearing_top_z_mm(self) -> float:
+        """
+        Height of the thrust bearing's upper face above the desk, in mm.
+
+        The bearing stands proud of the turret, so this -- not
+        :attr:`turret_top_z_mm` -- is the surface the yaw turntable rests on,
+        and the datum the rest of the base stack is measured from.
+        """
+        return self.turret_top_z_mm + self.bearing_proud_mm
 
     @property
     def top_arm_depth_mm(self) -> float:
@@ -773,9 +787,14 @@ class PedestalParameters:
             f"  Cavity Y offset        : {self.cavity_offset_y_mm:.2f} mm "
             f"(puts the output shaft on the yaw axis)\n"
             f"  Ear shelf at z         : {self.ear_shelf_z_mm:.2f} mm\n"
+            f"  Servo shaft output     : z = {self.servo_shaft_output_z_mm:.2f} mm\n"
             f"  Bearing seat           : {self.bearing_seat_diameter_mm:.2f} mm "
             f"dia x {self.bearing_seat_depth_mm:.2f} mm deep (floor at z = "
             f"{seat_bottom_z:.2f})\n"
+            f"  Bearing top (turntable): z = {self.bearing_top_z_mm:.2f} mm\n"
+            f"  Shoulder pivot         : z = {DEFAULT_ARM.base_height_mm:.2f} mm "
+            f"({hardware.above_pedestal_allowance_mm:.1f} mm of stack above the "
+            f"turret)\n"
             f"\n"
             f"  Anti-slip pads         : 2 strips, "
             + ", ".join(
