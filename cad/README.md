@@ -420,16 +420,16 @@ larger figure.
 
 ---
 
-## Known reach caveat
+## Reach (resolved in D.1d)
 
-Moving the base 30 mm inward improves the worst desk corner from 848.5 mm to
-**827.6 mm**. That still exceeds `ArmGeometry.safe_reach_mm` (807.5 mm, a
-conservative 85% of full extension), but `docs/PROOF_OF_CONCEPT.md` §2.1 sized
-the links against 89%, and 827.6 mm is 87.1% — inside the envelope the arm was
-actually designed for. `coverage_report()` therefore prints
-"Full-desk reachable? False" while the arm is fine.
-`test_worst_corner_sits_between_the_two_reach_thresholds` documents the
-disagreement and fails if a future change pushes the corner past 89%.
+Moving the base 30 mm inward for the clamp improves the worst desk corner from
+848.5 mm to **827.6 mm** — the mount offset is a small reach win, not a cost.
+
+That figure sat outside the old `safe_reach_mm` of 807.5 mm (85% of full
+extension) while still inside the 89% the links were sized against, so
+`coverage_report()` reported "Full-desk reachable? False" for an arm that was
+fine. Session D.1d raised `SAFE_REACH_FRACTION` to **0.88** (836.0 mm), which
+covers the corner with 8.4 mm to spare, and the report now reads True.
 
 ---
 

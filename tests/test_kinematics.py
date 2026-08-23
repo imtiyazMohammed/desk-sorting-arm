@@ -38,8 +38,22 @@ class TestGeometry:
     def test_total_reach_sums_links(self):
         assert DEFAULT_ARM.total_reach_mm == pytest.approx(950.0)
 
-    def test_safe_reach_is_85pct(self):
-        assert DEFAULT_ARM.safe_reach_mm == pytest.approx(950.0 * 0.85)
+    def test_safe_reach_is_the_declared_fraction(self):
+        assert DEFAULT_ARM.safe_reach_mm == pytest.approx(
+            950.0 * ArmGeometry.SAFE_REACH_FRACTION
+        )
+        assert ArmGeometry.SAFE_REACH_FRACTION == pytest.approx(0.88)
+
+    def test_safe_reach_covers_worst_desk_corner(self):
+        """
+        The invariant that makes safe_reach mean something.
+
+        A recommended operating radius that excludes the corners the arm was
+        built to reach is not a caution, it is a contradiction. This is why
+        Session D.1d raised the fraction from 0.85 to 0.88: the D.1c mount
+        offset put the far corners at 827.6 mm, outside the old 807.5 mm line.
+        """
+        assert DEFAULT_ARM.safe_reach_mm >= DEFAULT_ARM.worst_case_desk_reach_mm()
 
     def test_worst_case_desk_corner_matches_geometry(self):
         # Base at (600, 30) on a 1200x600 desk. Session D.1c moved it 30 mm
@@ -57,19 +71,29 @@ class TestGeometry:
             at_edge.worst_case_desk_reach_mm()
         )
 
-    def test_worst_corner_sits_between_the_two_reach_thresholds(self):
+    def test_design_is_no_safer_than_documented(self):
         """
-        Documents a known disagreement rather than papering over it.
+        An inverted assertion: it fails if the design gets BETTER, on purpose.
 
-        safe_reach_mm is 85% of full extension, a conservative round number,
-        while docs/PROOF_OF_CONCEPT.md section 2.1 sized the links against 89%.
-        The far desk corners land between the two, so coverage_report() says
-        "not reachable" while the arm is inside the envelope it was designed
-        for. If a future change moves the corner outside 89%, this test fails.
+        docs/PROOF_OF_CONCEPT.md section 2.1 sized the links so the worst desk
+        corner sits at about 89% of full extension, and the whole reach
+        argument rests on that figure. Asserting only that the corner is
+        *within* 89% would keep passing if someone quietly lengthened a link
+        or moved the base, leaving the document describing a design that no
+        longer exists.
+
+        So this asserts the corner is still close to 89% from below. If a
+        change makes the arm roomier, this test fails and the failure is the
+        signal to update section 2.1 -- not a bug to be silenced.
         """
-        worst = DEFAULT_ARM.worst_case_desk_reach_mm()
-        assert worst > DEFAULT_ARM.safe_reach_mm
-        assert worst < 0.89 * DEFAULT_ARM.total_reach_mm
+        utilisation = (
+            DEFAULT_ARM.worst_case_desk_reach_mm() / DEFAULT_ARM.total_reach_mm
+        )
+        assert utilisation < 0.89, "worst corner has moved outside the design envelope"
+        assert utilisation > 0.85, (
+            "the arm now has more margin than PROOF_OF_CONCEPT section 2.1 "
+            "documents -- update the document rather than loosening this bound"
+        )
 
     def test_joint_limit_ordering(self):
         with pytest.raises(ValueError):

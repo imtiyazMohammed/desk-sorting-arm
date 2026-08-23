@@ -23,7 +23,7 @@ Phase A has been dropped. Raspberry Pi OS Bookworm ships 3.11 and Trixie ships
 # 1. Install dependencies
 python3 -m pip install -r requirements.txt
 
-# 2. Run the test suite (423 tests, ~11 seconds)
+# 2. Run the test suite (449 tests, ~11 seconds)
 python3 -m pytest tests/ -v
 
 # 3. Try the module smoke tests
@@ -83,10 +83,10 @@ desk_arm/
 │   ├── preview_camera.py       # Manual webcam check, not run by CI
 │   └── calibrate_camera.py     # Interactive intrinsic calibration
 ├── tests/
-│   ├── test_kinematics.py      # 32 tests - Phase A kinematics
+│   ├── test_kinematics.py      # 35 tests - Phase A kinematics
 │   ├── test_image_source.py    # 71 tests - Session B.1 image acquisition
 │   ├── test_camera_calibration.py  # 100 tests - Session B.2 calibration
-│   └── test_cad.py             # 217 tests - Sessions D.1/D.1b/D.1c parametric CAD
+│   └── test_cad.py             # 243 tests - Sessions D.1/D.1b/D.1c/D.1d parametric CAD
 ├── docs/
 │   ├── PROOF_OF_CONCEPT.md     # Design + math + validation
 │   └── figures/                # Generated diagrams

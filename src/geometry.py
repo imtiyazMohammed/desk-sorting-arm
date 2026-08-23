@@ -129,10 +129,29 @@ class ArmGeometry:
         """Maximum theoretical reach (fully extended arm)."""
         return self.l1_upper_arm_mm + self.l2_forearm_mm + self.l3_wrist_to_tip_mm
 
+    #: Fraction of full extension treated as the recommended operating limit.
+    #:
+    #: Raised from 0.85 to 0.88 in Session D.1d. A serial arm loses reach
+    #: rapidly near full extension because the Jacobian goes rank-deficient, so
+    #: this is a caution line rather than a hard limit -- but at 0.85 it sat
+    #: BELOW the desk's far corners, which is not a caution, it is a
+    #: contradiction: the arm was designed to reach them.
+    #:
+    #: D.1c moved the base 30 mm inward to clear the U-clamp, improving the
+    #: worst corner from 848.5 mm to 827.6 mm -- 87.1% of full extension. The
+    #: old 0.85 (807.5 mm) could not cover that; 0.88 (836.0 mm) does, with
+    #: 8.4 mm to spare, and still sits inside the 0.89 the links were sized
+    #: against in docs/PROOF_OF_CONCEPT.md section 2.1.
+    SAFE_REACH_FRACTION: ClassVar[float] = 0.88
+
     @property
     def safe_reach_mm(self) -> float:
-        """Recommended max operating radius (85% of full extension)."""
-        return 0.85 * self.total_reach_mm
+        """
+        Recommended maximum operating radius, in mm.
+
+        See :attr:`SAFE_REACH_FRACTION` for why the fraction is what it is.
+        """
+        return self.SAFE_REACH_FRACTION * self.total_reach_mm
 
     @property
     def num_dof(self) -> int:
@@ -193,7 +212,8 @@ class ArmGeometry:
             f"  Forearm  (L2)        : {self.l2_forearm_mm:.1f} mm\n"
             f"  Wrist->tip (L3)      : {self.l3_wrist_to_tip_mm:.1f} mm\n"
             f"  Total reach          : {self.total_reach_mm:.1f} mm\n"
-            f"  Safe reach (85%)     : {self.safe_reach_mm:.1f} mm\n"
+            f"  Safe reach ({self.SAFE_REACH_FRACTION * 100:.0f}%)     : "
+            f"{self.safe_reach_mm:.1f} mm\n"
             f"  DOF                  : {self.num_dof}\n"
             f"  Worst-case corner    : {worst:.1f} mm from base\n"
             f"  Full-desk reachable? : {reachable}\n"

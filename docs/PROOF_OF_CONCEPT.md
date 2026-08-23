@@ -63,21 +63,55 @@ above the turret's top face rather than flush with it.
 
 ### 2.1 Reach Sizing — the Math
 
-The worst-case pick point is the corner of the desk farthest from the base. With the base at position `(600, 0)` on a `1200 × 600` desk, the farthest corners are `(0, 600)` and `(1200, 600)`:
+The worst-case pick point is the corner of the desk farthest from the base.
+
+**Phase A**, with the base on the desk edge at `(600, 0)`:
 
 ```
-d_worst = sqrt( (1200 - 600)^2 + (600 - 0)^2 )
-        = sqrt( 600^2 + 600^2 )
-        = sqrt( 720,000 )
-        = 848.528 mm
+d_worst = sqrt( 600^2 + 600^2 ) = 848.528 mm     (0.893 of full extension)
 ```
 
-A serial revolute arm loses reach very rapidly as it approaches full extension because Jacobian rank deficiency (a singularity) sends joint velocities toward infinity. We therefore design so that the worst-case target sits at ~89 % of theoretical reach:
+**Since D.1c**, the U-clamp holds the yaw axis 30 mm inward of the desk edge,
+so the base sits at `(600, 30)` and the farthest corners `(0, 600)` and
+`(1200, 600)` move slightly closer:
+
+```
+d_worst = sqrt( 600^2 + 570^2 ) = 827.587 mm     (0.871 of full extension)
+```
+
+The mount offset is a small reach *win*, not a cost.
+
+A serial revolute arm loses reach very rapidly as it approaches full extension
+because Jacobian rank deficiency (a singularity) sends joint velocities toward
+infinity. We therefore design so that the worst-case target sits at ~89 % of
+theoretical reach:
 
 ```
 L_total_required = d_worst / 0.89 ≈ 953 mm
-Actual choice: L_total = 400 + 350 + 200 = 950 mm  (0.898 utilization)
+Actual choice: L_total = 400 + 350 + 200 = 950 mm
 ```
+
+### Safe reach ceiling — raised in D.1d
+
+`ArmGeometry.safe_reach_mm` is a separate, more conservative caution line:
+`SAFE_REACH_FRACTION × total_reach_mm`. Phase A set that fraction to 0.85
+(807.5 mm), comfortably below the 0.89 the links were sized against.
+
+Once D.1c placed the base at `(600, 30)`, the far corners sat at 827.6 mm —
+*outside* the 0.85 line while still inside the 0.89 design envelope, so
+`coverage_report()` printed "Full-desk reachable? False" for an arm that was
+fine. A recommended operating radius that excludes the corners the arm was
+built to reach is not a caution, it is a contradiction.
+
+Session D.1d raised the fraction to **0.88** (836.0 mm), which covers the
+827.6 mm corner with 8.4 mm to spare and still sits inside 0.89. Two tests
+pin it from both sides:
+
+- `test_safe_reach_covers_worst_desk_corner` — fails if the ceiling is ever
+  lowered back below the corners.
+- `test_design_is_no_safer_than_documented` — an inverted assertion that fails
+  if utilisation drifts *away* from ~89 %, so a link change cannot silently
+  leave this section describing a design that no longer exists.
 
 ### 2.2 Torque Budget — Honest Disclosure
 
