@@ -12,7 +12,8 @@ Every part in this package derives its dimensions from `src/geometry.py`:
   budget, the base's position on the desk, and the mass estimates the mount is
   sized against.
 - **`DEFAULT_HARDWARE`** (`HardwareSpec`) — off-the-shelf component envelopes:
-  the DS3218 servo, the 608ZZ bearing, the M8 desk clamp, print clearances.
+  the DS3218 servo, the 6806ZZ yaw bearing and 608ZZ shoulder idler, the servo
+  horn, the M8 desk clamp, print clearances.
 
 No module in `cad/` declares a physical dimension of its own. This is the same
 discipline that keeps `arm_chain.py` building its ikpy chain programmatically
@@ -450,16 +451,21 @@ arm and the screw has to reach hardest.
 
 ## Assembly
 
-### 1. Print the three parts
+### 1. Print the parts
 
 | Part | Orientation | Notes |
 |---|---|---|
 | `base_pedestal` | Spine face down on the bed | The U's opening faces sideways; no supports needed for the throat |
 | `desk_clamp_knob` | Hex socket **down** | Crisp socket, no supports |
 | `desk_clamp_pressure_foot` | Pad recess **up** | Bore bridges cleanly |
+| `yaw_turntable` | Spigot **up** | The plate's face lands on the bed; the race relief bridges |
+| `shoulder_bracket` | Base plate down | Walls print upright; the servo slot is open at the top |
+| `shoulder_idler_plug` | Plate face down, axle up | The axle is a short tower, no supports |
+| `upper_arm` | On its side, one yoke flange on the bed | The trough and both flanges then print without overhangs |
 
 PETG throughout, ≥ 4 perimeters. The design assumes 4 × 0.4 mm walls
-(`min_wall_thickness_mm = 4.0`).
+(`min_wall_thickness_mm = 4.0`); the upper arm's 3 mm beam walls are an
+explicit, documented exception.
 
 ### 2. Glue in the anti-slip pads
 

@@ -46,9 +46,9 @@ to the shoulder pivot:
 | Component | Height | Source |
 |---|---|---|
 | U-clamp pedestal, desk surface → turret top | 69.5 mm | derived (whatever is left) |
-| 608ZZ bearing standing proud of the turret | 0.5 mm | `BearingSpec.proud_mm` |
-| Yaw turntable plate | 6.0 mm | `BaseStack` (provisional, Session D.2) |
-| Shoulder bracket rise | 24.0 mm | `BaseStack` (provisional, Session D.3) |
+| Yaw bearing standing proud of the turret | 0.5 mm | `BearingSpec.proud_mm` (a 6806ZZ since D.2a -- see §2.3) |
+| Yaw turntable plate | 6.0 mm | `BaseStack`, realised in D.2a |
+| Shoulder bracket rise | 24.0 mm | `BaseStack`, realised in D.2b |
 | **Total = shoulder pivot** | **100.0 mm** | `ArmGeometry.base_height_mm` |
 
 The pedestal's height is the *dependent* term: it is `base_height_mm` less
