@@ -45,7 +45,6 @@ from src.geometry import (
     DeskClampSpec,
     FastenerSpec,
     HardwareSpec,
-    LinkSpec,
     PETG_ALLOWABLE_STRESS_MPA,
     PETG_DENSITY_G_CM3,
     PETG_TENSILE_YIELD_MPA,
