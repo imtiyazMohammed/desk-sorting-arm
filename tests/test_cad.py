@@ -1,5 +1,5 @@
 """
-Test suite for the parametric CAD (Sessions D.1 through D.2a).
+Test suite for the parametric CAD (Sessions D.1 through D.2b).
 
 Test areas
 ----------
@@ -14,6 +14,7 @@ Test areas
    checked for every printable part
 8. Yaw turntable (D.2a), including the horn/bearing compatibility rules that
    forced the 608ZZ off the yaw axis
+9. Shoulder bracket (D.2b), including the stack closing on base_height_mm
 
 The mesh checks parse the exported STL directly rather than trusting the
 kernel's own report, because "the STL is watertight" is a property of the
@@ -80,6 +81,14 @@ from cad.desk_clamp_pressure_foot import (  # noqa: E402
     build_pressure_foot,
     export_pressure_foot,
 )
+from cad.shoulder_bracket import (  # noqa: E402
+    ShoulderBracketDesignError,
+    ShoulderBracketParameters,
+    build_idler_plug,
+    build_shoulder_bracket,
+    export_idler_plug,
+    export_shoulder_bracket,
+)
 from cad.yaw_turntable import (  # noqa: E402
     TurntableDesignError,
     TurntableParameters,
@@ -93,12 +102,16 @@ PART_EXPORTERS = {
     "desk_clamp_knob": export_knob,
     "desk_clamp_pressure_foot": export_pressure_foot,
     "yaw_turntable": export_turntable,
+    "shoulder_bracket": export_shoulder_bracket,
+    "shoulder_idler_plug": export_idler_plug,
 }
 PART_BUILDERS = {
     "base_pedestal": build_pedestal,
     "desk_clamp_knob": build_knob,
     "desk_clamp_pressure_foot": build_pressure_foot,
     "yaw_turntable": build_turntable,
+    "shoulder_bracket": build_shoulder_bracket,
+    "shoulder_idler_plug": build_idler_plug,
 }
 
 
@@ -253,6 +266,12 @@ def knob() -> KnobParameters:
 def turntable() -> TurntableParameters:
     """Default yaw-turntable parameters (Session D.2a)."""
     return TurntableParameters.from_geometry()
+
+
+@pytest.fixture(scope="module")
+def bracket() -> ShoulderBracketParameters:
+    """Default shoulder-bracket parameters (Session D.2b)."""
+    return ShoulderBracketParameters.from_geometry()
 
 
 # =========================================================================
@@ -1777,7 +1796,256 @@ class TestYawTurntableSolid:
 
 
 # =========================================================================
-# 9. Shared primitives
+# 9. Session D.2b -- shoulder bracket
+# =========================================================================
+
+
+class TestShoulderBracketParameters:
+    def test_default_parameters_validate(self, bracket):
+        assert bracket.validate() is DesignStatus.OK
+
+    def test_shoulder_shaft_height_matches_base_height(self, bracket):
+        """
+        The loop closes: pedestal + bearing + turntable + bracket = 100 mm.
+
+        This is what the whole base stack exists to achieve, and it is checked
+        against ArmGeometry rather than against a copy of the number.
+        """
+        assert bracket.shaft_axis_z_in_desk_frame_mm == pytest.approx(
+            DEFAULT_ARM.base_height_mm, abs=1e-9
+        )
+        assert bracket.stack_below_mm == pytest.approx(
+            DEFAULT_HARDWARE.pedestal_height_mm()
+            + DEFAULT_HARDWARE.thrust_bearing.proud_mm
+            + DEFAULT_HARDWARE.yaw_turntable.thickness_mm
+        )
+
+    def test_bracket_rise_matches_the_height_budget(self, bracket):
+        assert bracket.pitch_axis_z_mm == pytest.approx(
+            DEFAULT_HARDWARE.base_stack.shoulder_bracket_rise_mm
+        )
+
+    def test_shoulder_servo_fits_in_bracket_cavity(self, bracket):
+        servo = DEFAULT_HARDWARE.shoulder_pitch_servo
+        clearance = DEFAULT_HARDWARE.print_clearance_mm
+        span_x, span_y, span_z = bracket.servo_cavity_span_mm
+        assert span_x == pytest.approx(servo.body_length_mm + 2.0 * clearance)
+        assert span_z == pytest.approx(servo.body_width_mm + 2.0 * clearance)
+        # Across the walls, what must fit is the body behind the ears; the
+        # remaining 10 mm passes through the driven wall's slot.
+        assert span_y == pytest.approx(
+            servo.body_depth_behind_ears_mm + 2.0 * clearance
+        )
+        assert span_y >= servo.body_depth_behind_ears_mm
+
+    def test_servo_straddles_the_pitch_axis_and_clears_the_plate(self, bracket):
+        assert bracket.cavity_z_min_mm < bracket.pitch_axis_z_mm < bracket.cavity_z_max_mm
+        assert bracket.cavity_z_min_mm > bracket.plate_thickness_mm
+
+    def test_standing_the_servo_on_end_would_not_fit(self, bracket):
+        """
+        The measurement behind "the servo lies on its side".
+
+        Its ears are 49.5 mm apart along the body's length. Stood on end at a
+        24 mm rise, the lower one lands 0.75 mm *below* the turntable the
+        bracket is bolted to -- so the orientation is forced, not chosen.
+        """
+        servo = DEFAULT_HARDWARE.shoulder_pitch_servo
+        lower_ear_z = (
+            bracket.pitch_axis_z_mm - servo.flange_hole_spacing_long_mm / 2.0
+        )
+        assert lower_ear_z == pytest.approx(-0.75)
+        assert lower_ear_z < 0.0
+
+    def test_servo_screws_land_in_wall_material_not_the_slot(self, bracket):
+        for screw_x, _ in bracket.servo_screw_positions:
+            assert not (
+                bracket.cavity_x_min_mm <= screw_x <= bracket.cavity_x_max_mm
+            )
+
+    def test_servo_screws_are_blind_with_a_floor(self, bracket):
+        assert bracket.servo_screw_depth_mm < bracket.wall_thickness_mm
+
+    def test_bracket_base_matches_turntable_top_pattern(self, bracket):
+        """The bracket drills exactly where the turntable threads."""
+        expected = DEFAULT_HARDWARE.yaw_turntable.bracket_bolt_positions()
+        assert sorted(bracket.turntable_bolt_positions) == sorted(expected)
+        assert bracket.turntable_bolt_clearance_mm > (
+            DEFAULT_HARDWARE.yaw_turntable.bracket_bolt_nominal_diameter_mm
+        )
+
+    def test_turntable_screws_are_reachable_between_the_walls(self, bracket):
+        for _, bolt_y in bracket.turntable_bolt_positions:
+            assert abs(bolt_y) + bracket.turntable_bolt_clearance_mm / 2.0 < (
+                bracket.wall_inner_y_mm
+            )
+
+    def test_walls_are_symmetric_about_the_mid_plane(self, bracket):
+        """
+        The retrofit provision: both walls carry the same servo pattern.
+
+        Which one is driven is a matter of which side the servo goes in; the
+        other takes the idler plug today and a reduction plate later.
+        """
+        assert bracket.wall_inner_y_mm > 0.0
+        assert bracket.wall_outer_y_mm > bracket.wall_inner_y_mm
+        solid = build_shoulder_bracket(bracket)
+        box = solid.bounding_box()
+        assert box.min.Y == pytest.approx(-box.max.Y, abs=1e-6)
+
+    def test_shaft_direction_matches_the_fk_convention(self, bracket):
+        """
+        Shoulder pitch is a rotation about the base frame's +Y in
+        forward_kinematics.py, so the output shaft points +Y and the servo's
+        positive rotation is positive theta_2 with no sign flip.
+        """
+        assert bracket.shaft_direction == "+Y"
+        assert DEFAULT_HARDWARE.shoulder_bracket.shaft_sign == 1.0
+
+    def test_horn_face_is_where_the_upper_arm_bolts(self, bracket):
+        servo, horn = (
+            DEFAULT_HARDWARE.shoulder_pitch_servo,
+            DEFAULT_HARDWARE.servo_horn,
+        )
+        assert bracket.horn_face_y_mm == pytest.approx(
+            bracket.shaft_face_y_mm
+            + servo.shaft_boss_height_mm
+            + horn.total_height_mm
+        )
+
+    def test_cable_slot_leaves_at_the_rear_not_down_the_yaw_axis(self, bracket):
+        """
+        D.2b's brief routed the shoulder lead down through the turntable.
+
+        It cannot go that way: the yaw servo's shaft and its horn fill the yaw
+        axis solid all the way from the turret to the turntable's cap. The slot
+        is a notch in the plate's rear edge instead, and the cable needs a
+        service loop for the +/-135 degrees of yaw travel.
+        """
+        assert bracket.cable_slot_x_mm > 0.0
+        slot_far_edge = bracket.plate_x_min_mm + bracket.cable_slot_x_mm
+        assert slot_far_edge < 0.0
+        assert abs(bracket.plate_x_min_mm) > bracket.turntable_radius_mm
+
+    def test_plate_overhangs_the_turntable_by_design(self, bracket):
+        """
+        Recorded rather than asserted away: the plate is sized by the servo's
+        54.5 mm flange, the disc by the bearing. The bolt pattern is well
+        inside the disc, so the overhang carries nothing.
+        """
+        assert bracket.turntable_overhang_mm > 0.0
+        for bolt_x, bolt_y in bracket.turntable_bolt_positions:
+            assert math.hypot(bolt_x, bolt_y) < bracket.turntable_radius_mm
+
+    def test_bracket_stays_within_reach_of_the_yoke(self, bracket):
+        assert 0.0 < bracket.max_radius_from_pitch_axis_mm < 60.0
+
+    def test_report_names_the_key_dimensions(self, bracket):
+        report = bracket.report()
+        for token in ("Pitch axis", "Horn face", "Idler axle", "Servo slot"):
+            assert token in report
+
+
+class TestShoulderBracketDesignRules:
+    def test_a_stack_that_misses_the_base_height_is_rejected(self, bracket):
+        broken = replace(bracket, pitch_axis_z_mm=bracket.pitch_axis_z_mm + 1.0)
+        with pytest.raises(ShoulderBracketDesignError) as excinfo:
+            broken.validate()
+        assert excinfo.value.status is DesignStatus.INVALID_PARAMETER
+        assert "base_height_mm" in str(excinfo.value)
+
+    def test_a_budget_that_disagrees_with_the_bracket_is_caught_upstream(self):
+        """
+        BaseStack and ShoulderBracketSpec state the same rise; HardwareSpec
+        refuses to hold two different answers.
+        """
+        with pytest.raises(ValueError, match="budgets"):
+            HardwareSpec(shoulder_bracket=ShoulderBracketSpec(bracket_height_mm=30.0))
+
+    def test_servo_fouling_the_base_plate_is_rejected(self, bracket):
+        broken = replace(bracket, plate_thickness_mm=bracket.cavity_z_min_mm + 1.0)
+        with pytest.raises(ShoulderBracketDesignError) as excinfo:
+            broken.validate()
+        assert excinfo.value.status is DesignStatus.FEATURE_COLLISION
+
+    def test_screws_breaking_through_the_wall_are_rejected(self, bracket):
+        broken = replace(bracket, servo_screw_depth_mm=bracket.wall_thickness_mm)
+        with pytest.raises(ShoulderBracketDesignError) as excinfo:
+            broken.validate()
+        assert excinfo.value.status is DesignStatus.WALL_TOO_THIN
+
+    def test_walls_overhanging_the_base_plate_are_rejected(self, bracket):
+        broken = replace(bracket, plate_x_max_mm=bracket.wall_x_max_mm - 1.0)
+        with pytest.raises(ShoulderBracketDesignError) as excinfo:
+            broken.validate()
+        assert excinfo.value.status is DesignStatus.FEATURE_COLLISION
+
+    def test_turntable_screws_under_a_wall_are_rejected(self, bracket):
+        broken = replace(
+            bracket,
+            turntable_bolt_positions=((0.0, bracket.wall_inner_y_mm + 1.0),),
+        )
+        with pytest.raises(ShoulderBracketDesignError) as excinfo:
+            broken.validate()
+        assert excinfo.value.status is DesignStatus.FEATURE_COLLISION
+        assert "driver" in str(excinfo.value)
+
+    def test_a_cable_slot_that_cuts_the_walls_is_rejected(self, bracket):
+        broken = replace(bracket, cable_slot_y_mm=2.0 * bracket.wall_inner_y_mm)
+        with pytest.raises(ShoulderBracketDesignError) as excinfo:
+            broken.validate()
+        assert excinfo.value.status is DesignStatus.FEATURE_COLLISION
+
+    def test_an_axle_too_short_for_its_bearing_is_rejected(self, bracket):
+        broken = replace(bracket, idler_axle_length_mm=3.0)
+        with pytest.raises(ShoulderBracketDesignError) as excinfo:
+            broken.validate()
+        assert excinfo.value.status is DesignStatus.INVALID_PARAMETER
+
+    def test_build_rejects_invalid_parameters(self, bracket):
+        with pytest.raises(ShoulderBracketDesignError):
+            build_shoulder_bracket(replace(bracket, pitch_axis_z_mm=30.0))
+
+
+class TestShoulderBracketSolid:
+    def test_bracket_is_one_solid_standing_on_its_plate(self, bracket):
+        solid = build_shoulder_bracket(bracket)
+        assert len(solid.solids()) == 1
+        box = solid.bounding_box()
+        assert box.min.Z == pytest.approx(0.0)
+        assert box.max.Z == pytest.approx(bracket.wall_top_z_mm)
+
+    def test_servo_slot_removes_material_from_both_walls(self, bracket):
+        solid = build_shoulder_bracket(bracket)
+        closed = replace(
+            bracket,
+            cavity_x_min_mm=-1.0,
+            cavity_x_max_mm=1.0,
+        )
+        assert solid.volume < build_shoulder_bracket(closed).volume
+
+    def test_idler_plug_is_one_solid_reaching_its_bearing(self, bracket):
+        plug = build_idler_plug(bracket)
+        assert len(plug.solids()) == 1
+        box = plug.bounding_box()
+        assert box.min.Y == pytest.approx(0.0, abs=1e-6)
+        assert box.max.Y == pytest.approx(
+            bracket.plug_thickness_mm
+            + bracket.plug_boss_length_mm
+            + bracket.idler_axle_length_mm
+        )
+
+    def test_idler_plug_uses_the_servos_own_hole_pattern(self, bracket):
+        """
+        What makes the plug and a second servo interchangeable in that wall.
+        """
+        plug = build_idler_plug(bracket)
+        solid = replace(bracket, servo_screw_diameter_mm=0.5)
+        assert plug.volume < build_idler_plug(solid).volume
+
+
+# =========================================================================
+# 10. Shared primitives
 # =========================================================================
 
 
