@@ -200,7 +200,7 @@ class PedestalParameters:
         arm: Optional[ArmGeometry] = None,
         hardware: Optional[HardwareSpec] = None,
         *,
-        ear_top_offset_from_body_top_mm: float = 10.0,
+        ear_top_offset_from_body_top_mm: Optional[float] = None,
         cable_slot_width_mm: float = 8.0,
         cable_slot_height_mm: float = 5.0,
         servo_screw_hole_depth_mm: float = 6.0,
@@ -215,7 +215,11 @@ class PedestalParameters:
             injectable so tests can vary the design without touching globals.
         ear_top_offset_from_body_top_mm:
             Distance from the top of the servo body down to the top of its
-            mounting ears. UNVERIFIED placeholder -- see the module warning.
+            mounting ears. Defaults to
+            ``ServoSpec.ear_offset_from_shaft_face_mm``, which is where the
+            number now lives -- Session D.2b needed the same measurement in the
+            shoulder bracket, so it moved to the servo it describes. Still an
+            UNVERIFIED placeholder; see the module warning.
         cable_slot_width_mm, cable_slot_height_mm:
             Radial slot letting the servo lead out through the turret's
             inboard wall.
@@ -235,6 +239,8 @@ class PedestalParameters:
         clamp = hardware.desk_clamp
         clearance = hardware.print_clearance_mm
         wall = hardware.min_wall_thickness_mm
+        if ear_top_offset_from_body_top_mm is None:
+            ear_top_offset_from_body_top_mm = servo.ear_offset_from_shaft_face_mm
 
         for name, value in (
             ("ear_top_offset_from_body_top_mm", ear_top_offset_from_body_top_mm),

@@ -184,6 +184,37 @@ class ArmGeometry:
         distances = np.linalg.norm(corners - base, axis=1)
         return float(distances.max())
 
+    #: Where the arm's own centre of mass sits, as a fraction of full reach.
+    #: docs/PROOF_OF_CONCEPT.md section 2.2 took it at 400 mm from the
+    #: shoulder; 0.40 of the 950 mm reach is 380 mm, the same figure to within
+    #: 5%, and it tracks the link lengths instead of restating one of them.
+    ARM_COM_FRACTION: ClassVar[float] = 0.40
+
+    def shoulder_moment_nm(self, gravity_m_s2: float = 9.81) -> float:
+        """
+        Static moment about the shoulder pitch axis, in newton-metres.
+
+        The arm horizontal and fully extended, holding a full payload: the
+        payload acting at full reach plus the arm's own mass acting at
+        :attr:`ARM_COM_FRACTION` of it. This is the load every structural
+        member distal to the shoulder has to carry, and it is also the torque
+        the shoulder servo has to hold - see docs/PROOF_OF_CONCEPT.md section
+        2.2, which records that it exceeds the DS3218's rating.
+
+        Distinct from :meth:`tipping_moment_nm`, which is deliberately
+        pessimistic for sizing the desk mount. This one is the honest estimate,
+        because using a doubled load to size a link would just make the arm
+        heavier and the shoulder shortfall worse.
+        """
+        reach_m = self.total_reach_mm / 1000.0
+        payload = self.max_payload_kg * reach_m * gravity_m_s2
+        own_mass = (
+            self.estimated_arm_mass_kg
+            * (self.ARM_COM_FRACTION * reach_m)
+            * gravity_m_s2
+        )
+        return float(payload + own_mass)
+
     def tipping_moment_nm(self, gravity_m_s2: float = 9.81) -> float:
         """
         Worst-case moment the base mount must resist, in newton-metres.
@@ -246,6 +277,26 @@ DEFAULT_ARM = ArmGeometry()
 # real component is measured.
 
 
+#: Tensile stress at yield for PETG, in MPa. Manufacturer data sheets cluster
+#: on 50 (Fillamentum and Rigid Ink both publish exactly 50 to ISO 527;
+#: 3D4Makers publishes 53), with the spread across the market running roughly
+#: 34-53 depending on formulation and print orientation. 50 is the figure the
+#: clamp was sized against in Session D.1 and it is kept here so every part
+#: quotes one number.
+PETG_TENSILE_YIELD_MPA: float = 50.0
+
+#: Safety factor applied to :data:`PETG_TENSILE_YIELD_MPA` for printed
+#: structural parts. Two, because layer adhesion is weaker than bulk material
+#: and none of these parts has been tested.
+STRUCTURAL_SAFETY_FACTOR: float = 2.0
+
+#: Working stress for printed structural parts, in MPa.
+PETG_ALLOWABLE_STRESS_MPA: float = PETG_TENSILE_YIELD_MPA / STRUCTURAL_SAFETY_FACTOR
+
+#: Density of PETG, g/cm^3. Used for print-mass estimates.
+PETG_DENSITY_G_CM3: float = 1.27
+
+
 @dataclass(frozen=True)
 class ServoSpec:
     """
@@ -294,6 +345,12 @@ class ServoSpec:
     # far the servo body must be offset inside the pedestal for its shaft to
     # land on the yaw axis, so an error here shifts the whole cavity.
     shaft_offset_from_body_end_mm: float = 10.0
+    #: How far below the shaft-end face the mounting ears sit, in mm. Every
+    #: part that holds a servo needs it: the pedestal cuts its retention shelf
+    #: at this depth, and the shoulder bracket sets its wall spacing from it.
+    #: It lived as a constructor default in cad/base_pedestal.py until Session
+    #: D.2b needed the same number in a second place.
+    ear_offset_from_shaft_face_mm: float = 10.0
     shaft_boss_diameter_mm: float = 13.0
     shaft_boss_height_mm: float = 4.0
     output_shaft_diameter_mm: float = 5.8
@@ -314,6 +371,7 @@ class ServoSpec:
         "flange_hole_spacing_short_mm",
         "flange_hole_diameter_mm",
         "shaft_offset_from_body_end_mm",
+        "ear_offset_from_shaft_face_mm",
         "shaft_boss_diameter_mm",
         "shaft_boss_height_mm",
         "output_shaft_diameter_mm",
@@ -336,6 +394,13 @@ class ServoSpec:
                 f"({self.shaft_offset_from_body_end_mm}) cannot exceed "
                 f"body_length_mm ({self.body_length_mm})."
             )
+        if self.ear_offset_from_shaft_face_mm >= self.body_height_mm:
+            raise ValueError(
+                f"ServoSpec {self.name}: ear_offset_from_shaft_face_mm "
+                f"({self.ear_offset_from_shaft_face_mm}) must be less than "
+                f"body_height_mm ({self.body_height_mm}); the ears are on the "
+                "case, not behind it."
+            )
         if self.flange_span_mm < self.body_length_mm:
             raise ValueError(
                 f"ServoSpec {self.name}: flange_span_mm ({self.flange_span_mm}) "
@@ -347,6 +412,18 @@ class ServoSpec:
     def travel_rad(self) -> float:
         """Total mechanical travel in radians."""
         return float(np.radians(self.travel_deg))
+
+    @property
+    def body_depth_behind_ears_mm(self) -> float:
+        """
+        Body remaining behind the mounting ears, in mm.
+
+        Measured along the shaft axis: the case is
+        :attr:`body_height_mm` deep and the ears sit
+        :attr:`ear_offset_from_shaft_face_mm` in from its shaft-end face, so
+        this is what a bracket has to leave room for behind its mounting wall.
+        """
+        return self.body_height_mm - self.ear_offset_from_shaft_face_mm
 
     @property
     def body_offset_from_shaft_axis_mm(self) -> float:
@@ -375,14 +452,30 @@ class BearingSpec:
     """
     A rolling-element bearing, described by its standard bore/OD/width triple.
 
-    The 608ZZ defaults are the ISO 15 dimension series for that designation
-    (8 mm bore, 22 mm outer diameter, 7 mm width) - a hard standard, not a
-    per-supplier value, so no verification flag is needed.
+    The 6806ZZ defaults are the standard dimensions for that designation
+    (30 mm bore, 42 mm outer diameter, 7 mm width) - a hard standard, not a
+    per-supplier value, so the triple needs no verification flag.
+
+    .. note::
+       **The yaw bearing was a 608ZZ until Session D.2a.** It could not stay:
+       the 608's 8 mm bore is the only path between the servo's output shaft
+       and the turntable above it, and no DS3218 horn fits through it. A 25T
+       round horn is 19.7-25 mm across, so the coupling had nowhere to live -
+       and nothing gripped the 608's inner race, which meant the "bearing" was
+       two washers with balls between them.
+
+       The 6806 is the smallest standard bearing whose bore clears the horn.
+       It is 7 mm wide, exactly like the 608, so the entire vertical budget in
+       :class:`BaseStack` is untouched by the swap. Its mean race diameter is
+       36 mm rather than 15 mm, so the arm's overturning moment produces about
+       2.4x less force on the races as a side benefit.
+
+       :data:`BEARING_608ZZ` survives as the shoulder yoke's idler.
     """
 
-    name: str = "608ZZ"
-    bore_diameter_mm: float = 8.0
-    outer_diameter_mm: float = 22.0
+    name: str = "6806ZZ"
+    bore_diameter_mm: float = 30.0
+    outer_diameter_mm: float = 42.0
     width_mm: float = 7.0
 
     #: Radial interference for a printed press fit. The seat is cut this much
@@ -396,11 +489,38 @@ class BearingSpec:
     #: as a modelling constant inside cad/ -- see HardwareSpec.pedestal_height_mm.
     proud_mm: float = 0.50
 
+    #: Outer diameter of the *inner* ring, in mm. The part above rides on this
+    #: ring's top face, so it bounds how far out the seating land may reach
+    #: before it fouls the outer ring instead.
+    #:
+    #: UNVERIFIED. Bearing tables publish bore/OD/width but rarely the ring
+    #: split, and it varies between makers. The value below is a deliberately
+    #: conservative estimate - bore plus a quarter of the radial section, which
+    #: predicts 11.5 mm for a 608 whose real inner ring is about 12.1 mm - so a
+    #: land sized against it stays on the inner ring even if the estimate is
+    #: optimistic by a millimetre.
+    inner_race_outer_diameter_mm: float = 33.0
+
+    #: Fields awaiting measurement of a physical bearing. The bore/OD/width
+    #: triple is a published standard and is deliberately absent from this list.
+    UNVERIFIED_FIELDS: ClassVar[Tuple[str, ...]] = ("inner_race_outer_diameter_mm",)
+
     def __post_init__(self) -> None:
         if not 0.0 < self.bore_diameter_mm < self.outer_diameter_mm:
             raise ValueError(
                 f"BearingSpec {self.name}: require "
                 f"0 < bore ({self.bore_diameter_mm}) < OD "
+                f"({self.outer_diameter_mm})."
+            )
+        if not (
+            self.bore_diameter_mm
+            < self.inner_race_outer_diameter_mm
+            < self.outer_diameter_mm
+        ):
+            raise ValueError(
+                f"BearingSpec {self.name}: inner_race_outer_diameter_mm "
+                f"({self.inner_race_outer_diameter_mm}) must lie strictly "
+                f"between the bore ({self.bore_diameter_mm}) and the OD "
                 f"({self.outer_diameter_mm})."
             )
         if self.width_mm <= 0.0:
@@ -424,6 +544,27 @@ class BearingSpec:
     def seat_depth_mm(self) -> float:
         """Depth of that pocket: the bearing's width less what stands proud."""
         return self.width_mm - self.proud_mm
+
+    @property
+    def race_land_width_mm(self) -> float:
+        """
+        Radial width of the inner ring's exposed top face, in mm.
+
+        The annulus a driven part may bear on without touching the outer ring.
+        """
+        return (self.inner_race_outer_diameter_mm - self.bore_diameter_mm) / 2.0
+
+
+#: The 608ZZ that used to be the yaw bearing. It remains in the bill of
+#: materials as the shoulder yoke's idler pivot - see
+#: :attr:`HardwareSpec.shoulder_idler_bearing`.
+BEARING_608ZZ = BearingSpec(
+    name="608ZZ",
+    bore_diameter_mm=8.0,
+    outer_diameter_mm=22.0,
+    width_mm=7.0,
+    inner_race_outer_diameter_mm=11.5,
+)
 
 
 @dataclass(frozen=True)
@@ -1085,6 +1226,624 @@ class DeskClampSpec:
 
 
 @dataclass(frozen=True)
+class ServoHornSpec:
+    """
+    The metal horn that couples a servo's splined output to a printed part.
+
+    Two parts of the arm are driven straight off a servo shaft - the yaw
+    turntable and the upper arm's shoulder end - and both use the same
+    interface, so it is described once here.
+
+    Why a bought horn rather than a printed spline
+    ----------------------------------------------
+    The DS3218's output is a 25-tooth spline 5.9 mm across. Tooth pitch is
+    therefore ``pi * 5.9 / 25 = 0.74 mm``, which a 0.4 mm nozzle cannot
+    resolve into anything that will carry 20 kg.cm. Every printed part in this
+    project drives through a bought aluminium horn instead, and bolts to it.
+
+    .. note::
+       **The spline diameter is the one verified number here.** DSServo's
+       listings and the retailers give 5.9 mm for the DS3218's 25T spline.
+       Everything describing the *horn* is a placeholder: round 25T horns are
+       sold at 19.7, 24.5 and 25 mm across by different suppliers, and hole
+       patterns vary (REV publishes six M3 holes on a 16 mm circle; Power HD
+       gives two holes at 15 and 19 mm radius). The defaults below describe a
+       25 mm round horn with four M3 holes on a 16 mm circle, which is
+       self-consistent - a 25 mm disc leaves 4.5 mm of rim outside a 16 mm
+       circle, enough for M3 - but the horn in hand must be measured before
+       anything is printed for final assembly.
+    """
+
+    name: str = "25T round horn"
+    spline_teeth: int = 25
+
+    #: Across the spline, in mm. Datasheet-confirmed for the DS3218.
+    spline_diameter_mm: float = 5.9
+
+    # ---- Disc and hub (PLACEHOLDER - measure before printing) ------------
+    #: Outside diameter of the horn's disc, in mm. Sets the pocket every driven
+    #: part needs, and hence the smallest bearing bore the coupling can pass
+    #: through.
+    disc_diameter_mm: float = 25.0
+    #: Thickness of that disc, in mm.
+    disc_thickness_mm: float = 3.0
+    #: Diameter of the hub boss on the servo side, in mm.
+    hub_diameter_mm: float = 13.0
+    #: Height of that boss, in mm. It rests on the servo's shaft boss, so the
+    #: horn's disc ends up this far above the shaft's crown.
+    hub_height_mm: float = 3.0
+
+    # ---- Mounting pattern (PLACEHOLDER - measure before printing) --------
+    bolt_circle_mm: float = 16.0
+    bolt_count: int = 4
+    #: Nominal thread of the horn's mounting holes, in mm. They are threaded,
+    #: so the driven part carries clearance holes and the screws pull into the
+    #: horn.
+    bolt_nominal_diameter_mm: float = 3.0
+    #: ISO 273 medium clearance hole for that thread.
+    bolt_clearance_diameter_mm: float = 3.4
+    #: Socket-head envelope for the counterbores the driven parts need, so no
+    #: screw head stands proud of a mating face.
+    bolt_head_diameter_mm: float = 5.5
+    bolt_head_height_mm: float = 3.0
+
+    UNVERIFIED_FIELDS: ClassVar[Tuple[str, ...]] = (
+        "disc_diameter_mm",
+        "disc_thickness_mm",
+        "hub_diameter_mm",
+        "hub_height_mm",
+        "bolt_circle_mm",
+        "bolt_count",
+    )
+
+    def __post_init__(self) -> None:
+        for name in (
+            "spline_diameter_mm", "disc_diameter_mm", "disc_thickness_mm",
+            "hub_diameter_mm", "hub_height_mm", "bolt_circle_mm",
+            "bolt_nominal_diameter_mm",
+        ):
+            if getattr(self, name) <= 0.0:
+                raise ValueError(
+                    f"ServoHornSpec {self.name}: {name} must be positive, got "
+                    f"{getattr(self, name)}."
+                )
+        if self.bolt_count < 3:
+            raise ValueError(
+                f"ServoHornSpec {self.name}: bolt_count must be at least 3 to "
+                f"locate a part rotationally, got {self.bolt_count}."
+            )
+        if self.bolt_circle_mm >= self.disc_diameter_mm:
+            raise ValueError(
+                f"ServoHornSpec {self.name}: the bolt circle "
+                f"({self.bolt_circle_mm}) must be smaller than the disc "
+                f"({self.disc_diameter_mm}); the holes would fall off it."
+            )
+        rim = (self.disc_diameter_mm - self.bolt_circle_mm) / 2.0
+        if rim <= self.bolt_nominal_diameter_mm:
+            raise ValueError(
+                f"ServoHornSpec {self.name}: only {rim:.2f} mm of rim outside "
+                f"the bolt circle, which cannot hold an "
+                f"M{self.bolt_nominal_diameter_mm:.0f} hole."
+            )
+        if self.hub_diameter_mm >= self.disc_diameter_mm:
+            raise ValueError(
+                f"ServoHornSpec {self.name}: the hub ({self.hub_diameter_mm}) "
+                f"must be smaller than the disc ({self.disc_diameter_mm})."
+            )
+        if self.spline_diameter_mm >= self.hub_diameter_mm:
+            raise ValueError(
+                f"ServoHornSpec {self.name}: the hub ({self.hub_diameter_mm}) "
+                f"must be wider than the spline it grips "
+                f"({self.spline_diameter_mm})."
+            )
+
+    @property
+    def total_height_mm(self) -> float:
+        """
+        Hub plus disc, in mm.
+
+        Measured from the servo's shaft boss - which the hub sits on - to the
+        horn's outer face, which is the surface a driven part bolts against.
+        """
+        return self.hub_height_mm + self.disc_thickness_mm
+
+    @property
+    def spline_tooth_pitch_mm(self) -> float:
+        """Circumferential pitch of one spline tooth, in mm."""
+        return float(np.pi * self.spline_diameter_mm / self.spline_teeth)
+
+    @property
+    def index_resolution_deg(self) -> float:
+        """
+        Finest angular step the spline can be re-indexed by, in degrees.
+
+        360 / 25 = 14.4 for a 25T spline. This is the resolution with which a
+        joint's zero can be set mechanically; anything finer is trimmed in
+        software.
+        """
+        return 360.0 / self.spline_teeth
+
+    def bolt_positions(self, phase_deg: float = 45.0) -> Tuple[Tuple[float, float], ...]:
+        """
+        (x, y) centres of the horn's mounting holes, in mm, about its axis.
+
+        ``phase_deg`` rotates the pattern; the default staggers it 45 degrees
+        so a four-hole pattern lands on the diagonals of a square part.
+        """
+        radius = self.bolt_circle_mm / 2.0
+        return tuple(
+            (
+                float(radius * np.cos(np.radians(phase_deg + i * 360.0 / self.bolt_count))),
+                float(radius * np.sin(np.radians(phase_deg + i * 360.0 / self.bolt_count))),
+            )
+            for i in range(self.bolt_count)
+        )
+
+    def unverified_report(self) -> str:
+        """Human-readable list of fields still awaiting physical measurement."""
+        lines = [
+            f"{self.name}: {len(self.UNVERIFIED_FIELDS)} UNVERIFIED dimension(s) "
+            "- measure the horn in hand before printing:"
+        ]
+        for field_name in self.UNVERIFIED_FIELDS:
+            lines.append(f"    {field_name:<34} = {getattr(self, field_name)}")
+        return "\n".join(lines)
+
+
+@dataclass(frozen=True)
+class YawTurntableSpec:
+    """
+    The plate that turns on the yaw bearing and carries the shoulder bracket.
+
+    It sits on top of the pedestal's thrust bearing, is driven by the base yaw
+    servo through a :class:`ServoHornSpec`, and presents a bolt circle for the
+    shoulder bracket. Bottom to top it is:
+
+    1. a spigot filling the bearing's bore, with the horn pocketed inside it,
+    2. a land bearing on the inner ring's top face,
+    3. the plate proper, relieved over the outer ring.
+
+    Why the plate does not simply sit on the bearing
+    ------------------------------------------------
+    The bearing stands ``BearingSpec.proud_mm`` (0.5 mm) above the turret. A
+    plain recess deeper than that would drop the plate onto the printed turret
+    face and leave the bearing carrying nothing, so
+    :attr:`bearing_race_recess_mm` relieves the **outer** ring only, and the
+    plate lands on the inner ring inside it. That is what makes the bearing a
+    bearing rather than a spacer.
+    """
+
+    #: Plate diameter, in mm. Sized from the bracket's bolt circle outward,
+    #: not from the turret: the turret is rectangular and 66 mm across its long
+    #: side, so a disc that covered it would have to overhang the top arm.
+    #: What the plate must cover is the bearing.
+    diameter_mm: float = 68.0
+
+    #: Plate thickness, in mm. Must equal ``BaseStack.turntable_plate_thickness_mm``
+    #: - the same 6 mm counted once in the height budget and once here.
+    thickness_mm: float = 6.0
+
+    #: Depth of the annular relief over the bearing's outer ring, in mm. Must
+    #: exceed ``BearingSpec.proud_mm`` or the relief does not clear.
+    bearing_race_recess_mm: float = 1.0
+
+    #: Diametral slip fit of the spigot in the bearing's bore, in mm. Taken off
+    #: the bore so the spigot enters without a press.
+    spigot_bore_fit_mm: float = 0.50
+
+    # ---- Shoulder bracket interface ---------------------------------------
+    #: (X, Y) spacing of the four shoulder-bracket screws, in mm, centred on
+    #: the yaw axis.
+    #:
+    #: A rectangle rather than a bolt circle, which is what the brief for D.2a
+    #: proposed. No circle works: the holes must clear the bearing's relief
+    #: (radius 21.25 mm) and must also miss the bracket's two walls, which
+    #: stand on the plate between y = 15.5 and 21.5 mm. A circle big enough for
+    #: the first crosses the second at every phase angle unless its diameter
+    #: exceeds 66 mm, at which point it is off the plate. Putting the holes on
+    #: a rectangle - well outboard along X, well inboard along Y - satisfies
+    #: both, and leaves all four heads reachable from above between the walls.
+    bracket_bolt_pattern_mm: Tuple[float, float] = (52.0, 20.0)
+    #: Nominal thread of the bracket screws.
+    bracket_bolt_nominal_diameter_mm: float = 3.0
+    #: Pilot hole the screws cut their own thread in. Blind, not through: a nut
+    #: on the underside would foul the bearing and the turret 0.5 mm below.
+    bracket_bolt_pilot_diameter_mm: float = 2.5
+    bracket_bolt_depth_mm: float = 4.0
+
+    # ---- Yaw-zero witness --------------------------------------------------
+    #: A notch in the rim marking the arm-forward direction, so the turntable
+    #: goes back on the horn the same way round after a strip-down.
+    #:
+    #: This is a witness mark, not a key. A true key is not possible against a
+    #: round horn whose four holes sit on a square: the pattern is symmetric
+    #: under 90 degree rotation, so any mating feature fits four ways. Keying
+    #: it would mean filing a flat on a bought horn. The notch lines up with
+    #: the matching one on the turret's front face at yaw zero.
+    index_notch_width_mm: float = 3.0
+    index_notch_depth_mm: float = 1.5
+    index_notch_length_mm: float = 6.0
+
+    def __post_init__(self) -> None:
+        for name in (
+            "diameter_mm", "thickness_mm", "bearing_race_recess_mm",
+            "spigot_bore_fit_mm",
+            "bracket_bolt_pilot_diameter_mm", "bracket_bolt_depth_mm",
+            "index_notch_width_mm", "index_notch_depth_mm",
+            "index_notch_length_mm",
+        ):
+            if getattr(self, name) <= 0.0:
+                raise ValueError(
+                    f"YawTurntableSpec: {name} must be positive, got "
+                    f"{getattr(self, name)}."
+                )
+        if len(self.bracket_bolt_pattern_mm) != 2 or any(
+            value <= 0.0 for value in self.bracket_bolt_pattern_mm
+        ):
+            raise ValueError(
+                "YawTurntableSpec: bracket_bolt_pattern_mm must be a pair of "
+                f"positive spacings, got {self.bracket_bolt_pattern_mm}."
+            )
+        if self.bracket_bolt_radius_mm * 2.0 >= self.diameter_mm:
+            raise ValueError(
+                f"YawTurntableSpec: the bracket bolt pattern reaches "
+                f"{self.bracket_bolt_radius_mm:.2f} mm from the axis, off a "
+                f"{self.diameter_mm} mm plate."
+            )
+        if self.bracket_bolt_depth_mm >= self.thickness_mm:
+            raise ValueError(
+                f"YawTurntableSpec: a {self.bracket_bolt_depth_mm} mm blind "
+                f"hole in a {self.thickness_mm} mm plate leaves no floor; the "
+                "screw would break through onto the bearing."
+            )
+        if self.bracket_bolt_pilot_diameter_mm >= self.bracket_bolt_nominal_diameter_mm:
+            raise ValueError(
+                f"YawTurntableSpec: the pilot hole "
+                f"({self.bracket_bolt_pilot_diameter_mm}) must be smaller than "
+                f"the screw ({self.bracket_bolt_nominal_diameter_mm}), or there "
+                "is no material for it to cut a thread in."
+            )
+        if self.index_notch_depth_mm >= self.thickness_mm:
+            raise ValueError(
+                "YawTurntableSpec: the index notch must not cut through the "
+                f"plate ({self.index_notch_depth_mm} into "
+                f"{self.thickness_mm} mm)."
+            )
+
+    @property
+    def bracket_bolt_count(self) -> int:
+        """Four, by construction: the pattern is a rectangle."""
+        return 4
+
+    @property
+    def bracket_bolt_radius_mm(self) -> float:
+        """How far the outermost bracket screw sits from the yaw axis, in mm."""
+        x_span, y_span = self.bracket_bolt_pattern_mm
+        return float(np.hypot(x_span / 2.0, y_span / 2.0))
+
+    def bracket_bolt_positions(self) -> Tuple[Tuple[float, float], ...]:
+        """(x, y) centres of the shoulder bracket's four mounting holes, in mm."""
+        x_span, y_span = self.bracket_bolt_pattern_mm
+        return tuple(
+            (float(sx * x_span / 2.0), float(sy * y_span / 2.0))
+            for sx in (-1.0, 1.0)
+            for sy in (-1.0, 1.0)
+        )
+
+
+@dataclass(frozen=True)
+class ShoulderBracketSpec:
+    """
+    The clevis that stands on the yaw turntable and carries the shoulder servo.
+
+    Two walls rise from a base plate with the shoulder pitch servo held between
+    them. Its output shaft is the shoulder pitch axis, and by construction that
+    axis lands at ``ArmGeometry.base_height_mm`` above the desk.
+
+    Sign convention
+    ---------------
+    ``forward_kinematics.py`` makes shoulder pitch a rotation about the base
+    frame's **+Y**, with positive theta pitching the arm *down* from horizontal.
+    :attr:`shaft_direction` records that the servo's output points the same way,
+    so the servo's positive rotation is positive theta_2 with no sign flip in
+    the driver. (Which pulse width produces which physical direction is a
+    property of the servo, not of this bracket, and is resolved by a per-joint
+    sign in the firmware.)
+
+    Why the servo lies on its side
+    ------------------------------
+    It has to. Standing the servo on end - body length vertical - puts its lower
+    mounting ear 24 - 49.5/2 = -0.75 mm relative to the base plate's underside,
+    i.e. below the turntable it is bolted to. Laid down, the body straddles the
+    pitch axis from 14 to 34 mm and both ears are reachable. Laying it down also
+    keeps every part of the bracket inside a 24 mm radius of the pitch axis, so
+    the upper arm's yoke can swing through the joint's full travel.
+
+    Retrofit provision
+    ------------------
+    docs/PROOF_OF_CONCEPT.md section 2.2 records that this joint needs about
+    34.5 kg.cm and a DS3218 supplies 20. The provision baked in here is that
+    **the two walls are identical**: the far wall carries the same servo window
+    and the same four mounting holes as the driven wall. Today it holds a small
+    idler plug with the yoke's pivot bearing; fitting a second DS3218 later is
+    a matter of unbolting that plug. A 2:1 reduction is the other option in
+    section 2.2 and is *not* designed here - its gear geometry has not been
+    chosen - but the same wall pattern is what a reduction plate would bolt to.
+    """
+
+    #: Footprint of the base plate on the turntable, (X, Y) in mm. X is the
+    #: arm-forward direction. Larger than the wall span because it also has to
+    #: carry the turntable's bolt circle with edge distance around it.
+    base_plate_mm: Tuple[float, float] = (72.0, 43.0)
+    base_plate_thickness_mm: float = 6.0
+
+    #: Wall thickness, in mm. Six rather than the 4 mm minimum because the
+    #: servo's retention screws are blind holes driven into the wall's inner
+    #: face: 4 mm would leave a 1 mm floor for an M3 to tent or break through.
+    wall_thickness_mm: float = 6.0
+
+    #: Depth of those blind pilot holes, in mm.
+    servo_screw_depth_mm: float = 4.5
+
+    #: Base plate underside to the shoulder pitch axis, in mm. Must equal
+    #: ``BaseStack.shoulder_bracket_rise_mm``: the same rise counted once in
+    #: the height budget and once here.
+    bracket_height_mm: float = 24.0
+
+    #: Which way along the base frame's Y the servo's output shaft points.
+    shaft_direction: str = "+Y"
+
+    #: Leg of the triangular gussets at the wall-to-base junctions, in mm.
+    #: Gussets, not fillets, for the reason cad/README.md gives: a swept fillet
+    #: is the most fragile operation to re-run when an upstream dimension moves,
+    #: and every dimension here is derived from this file.
+    gusset_size_mm: float = 6.0
+
+    #: Cable exit in the base plate for the shoulder servo's lead, (X, Y) in mm.
+    #: It routes down through the turntable's centre and into the pedestal.
+    cable_slot_mm: Tuple[float, float] = (16.0, 8.0)
+
+    # ---- Idler plug (fills the undriven wall) -----------------------------
+    #: Thickness of the plate that fills the far wall's servo window, in mm.
+    idler_plug_thickness_mm: float = 6.0
+    #: Diameter of the boss that carries the yoke's pivot out to meet it, in mm.
+    idler_boss_diameter_mm: float = 20.0
+
+    def __post_init__(self) -> None:
+        for name in (
+            "base_plate_thickness_mm", "wall_thickness_mm", "bracket_height_mm",
+            "gusset_size_mm", "idler_plug_thickness_mm",
+            "idler_boss_diameter_mm", "servo_screw_depth_mm",
+        ):
+            if getattr(self, name) <= 0.0:
+                raise ValueError(
+                    f"ShoulderBracketSpec: {name} must be positive, got "
+                    f"{getattr(self, name)}."
+                )
+        for label, pair in (
+            ("base_plate_mm", self.base_plate_mm),
+            ("cable_slot_mm", self.cable_slot_mm),
+        ):
+            if len(pair) != 2 or any(value <= 0.0 for value in pair):
+                raise ValueError(
+                    f"ShoulderBracketSpec: {label} must be a pair of positive "
+                    f"lengths, got {pair}."
+                )
+        if self.shaft_direction not in ("+Y", "-Y"):
+            raise ValueError(
+                f"ShoulderBracketSpec: shaft_direction must be '+Y' or '-Y', "
+                f"got {self.shaft_direction!r}. The shoulder pitch axis is the "
+                "base frame's Y axis; nothing else is meaningful."
+            )
+        if self.servo_screw_depth_mm >= self.wall_thickness_mm:
+            raise ValueError(
+                f"ShoulderBracketSpec: a {self.servo_screw_depth_mm} mm blind "
+                f"hole in a {self.wall_thickness_mm} mm wall leaves no floor; "
+                "the screw would break through."
+            )
+        if self.bracket_height_mm <= self.base_plate_thickness_mm:
+            raise ValueError(
+                f"ShoulderBracketSpec: the pitch axis "
+                f"({self.bracket_height_mm} mm) must sit above the base plate "
+                f"({self.base_plate_thickness_mm} mm thick), not inside it."
+            )
+
+    @property
+    def shaft_sign(self) -> float:
+        """+1 if the output shaft points along +Y, -1 if along -Y."""
+        return 1.0 if self.shaft_direction == "+Y" else -1.0
+
+    @property
+    def base_plate_x_mm(self) -> float:
+        return self.base_plate_mm[0]
+
+    @property
+    def base_plate_y_mm(self) -> float:
+        return self.base_plate_mm[1]
+
+
+@dataclass(frozen=True)
+class LinkSpec:
+    """
+    A structural arm link: a hollow rectangular beam between two joint axes.
+
+    Parameterised so L2 and L3 reuse it in Session D.3 rather than growing
+    their own near-copies.
+
+    The section is sized by stiffness and by what has to fit inside it, not by
+    strength. :meth:`bending_stress_mpa` on the worst-case shoulder moment
+    returns about 1.3 MPa against a 25 MPa allowable - a factor of nineteen -
+    because a 400 mm cantilever carrying 3.3 N.m is simply not a demanding
+    bending problem. What it costs is mass: see :meth:`estimated_mass_g`.
+    """
+
+    name: str
+    length_mm: float
+
+    #: Across the beam, perpendicular to its length and to gravity, in mm.
+    cross_section_width_mm: float = 40.0
+    #: The bending depth: vertical, in the plane the link swings in, in mm.
+    cross_section_height_mm: float = 25.0
+    #: Wall thickness of the hollow section, in mm.
+    #:
+    #: 3 mm is below ``HardwareSpec.min_wall_thickness_mm`` (4 mm), and that is
+    #: deliberate: the 4 mm floor was set for the clamp's load-bearing walls,
+    #: and 3 mm is still seven perimeters at a 0.4 mm nozzle. Taking the walls
+    #: to 4 mm would add roughly 29% to the mass of a link that already has a
+    #: nineteen-fold stress margin. The exemption is recorded in cad/README.md.
+    wall_thickness_mm: float = 3.0
+
+    #: (diameter, thickness) of the flange plate at each end, in mm.
+    end_flange_mm: Tuple[float, float] = (36.0, 6.0)
+
+    #: (width, depth) of the open cable channel, in mm.
+    cable_channel_mm: Tuple[float, float] = (8.0, 8.0)
+    #: Spacing of the strain-relief tabs bridging that channel, in mm.
+    strain_relief_pitch_mm: float = 80.0
+    #: How much of the channel's length each tab covers, in mm.
+    strain_relief_tab_width_mm: float = 4.0
+
+    def __post_init__(self) -> None:
+        for name in (
+            "length_mm", "cross_section_width_mm", "cross_section_height_mm",
+            "wall_thickness_mm", "strain_relief_pitch_mm",
+            "strain_relief_tab_width_mm",
+        ):
+            if getattr(self, name) <= 0.0:
+                raise ValueError(
+                    f"LinkSpec {self.name}: {name} must be positive, got "
+                    f"{getattr(self, name)}."
+                )
+        for label, pair in (
+            ("end_flange_mm", self.end_flange_mm),
+            ("cable_channel_mm", self.cable_channel_mm),
+        ):
+            if len(pair) != 2 or any(value <= 0.0 for value in pair):
+                raise ValueError(
+                    f"LinkSpec {self.name}: {label} must be a pair of positive "
+                    f"lengths, got {pair}."
+                )
+        if 2.0 * self.wall_thickness_mm >= min(
+            self.cross_section_width_mm, self.cross_section_height_mm
+        ):
+            raise ValueError(
+                f"LinkSpec {self.name}: walls of {self.wall_thickness_mm} mm "
+                f"meet in the middle of a "
+                f"{self.cross_section_width_mm} x "
+                f"{self.cross_section_height_mm} mm section; there is no "
+                "hollow left."
+            )
+        if self.cable_channel_mm[0] >= self.cross_section_width_mm:
+            raise ValueError(
+                f"LinkSpec {self.name}: the cable channel "
+                f"({self.cable_channel_mm[0]} mm) is as wide as the beam "
+                f"({self.cross_section_width_mm} mm)."
+            )
+        if self.strain_relief_tab_width_mm >= self.strain_relief_pitch_mm:
+            raise ValueError(
+                f"LinkSpec {self.name}: strain-relief tabs "
+                f"({self.strain_relief_tab_width_mm} mm) spaced every "
+                f"{self.strain_relief_pitch_mm} mm would close the channel."
+            )
+
+    # ---- Section properties -------------------------------------------------
+
+    @property
+    def inner_width_mm(self) -> float:
+        return self.cross_section_width_mm - 2.0 * self.wall_thickness_mm
+
+    @property
+    def inner_height_mm(self) -> float:
+        return self.cross_section_height_mm - 2.0 * self.wall_thickness_mm
+
+    @property
+    def cross_section_area_mm2(self) -> float:
+        """Material in one cross-section of the beam, in mm^2."""
+        return float(
+            self.cross_section_width_mm * self.cross_section_height_mm
+            - self.inner_width_mm * self.inner_height_mm
+        )
+
+    @property
+    def second_moment_mm4(self) -> float:
+        """
+        Second moment of area about the bending axis, in mm^4.
+
+        Bending is in the plane the link swings in, so the section's *height*
+        is its depth and the width is the flange breadth.
+        """
+        return float(
+            (
+                self.cross_section_width_mm * self.cross_section_height_mm**3
+                - self.inner_width_mm * self.inner_height_mm**3
+            )
+            / 12.0
+        )
+
+    @property
+    def section_modulus_mm3(self) -> float:
+        """Second moment divided by the distance to the extreme fibre."""
+        return float(self.second_moment_mm4 / (self.cross_section_height_mm / 2.0))
+
+    def bending_stress_mpa(self, moment_nm: float) -> float:
+        """
+        Peak bending stress in the section under ``moment_nm``, in MPa.
+
+        Raises
+        ------
+        ValueError
+            If ``moment_nm`` is negative.
+        """
+        if moment_nm < 0.0:
+            raise ValueError(f"moment_nm must be non-negative, got {moment_nm}.")
+        return float(moment_nm * 1000.0 / self.section_modulus_mm3)
+
+    def tip_deflection_mm(
+        self, moment_nm: float, youngs_modulus_mpa: float = 2000.0
+    ) -> float:
+        """
+        Cantilever tip deflection under an equivalent end load, in mm.
+
+        The moment is converted to the end load that would produce it over this
+        link's length, then the standard ``P L^3 / 3 E I`` is applied. A hand
+        calculation: it ignores shear, the joint compliance at both ends and
+        PETG's anisotropy, so treat it as an order of magnitude.
+        """
+        if moment_nm < 0.0:
+            raise ValueError(f"moment_nm must be non-negative, got {moment_nm}.")
+        end_load_n = moment_nm * 1000.0 / self.length_mm
+        return float(
+            end_load_n
+            * self.length_mm**3
+            / (3.0 * youngs_modulus_mpa * self.second_moment_mm4)
+        )
+
+    def estimated_mass_g(self, density_g_cm3: float = PETG_DENSITY_G_CM3) -> float:
+        """
+        Mass of the beam section alone, in grams.
+
+        Walls this thick print solid, so the section area is real material.
+        Excludes the end flanges, the cable channel and the distal servo
+        housing, all of which the CAD adds - this is the floor, not the total.
+        """
+        return float(
+            self.cross_section_area_mm2 * self.length_mm / 1000.0 * density_g_cm3
+        )
+
+    @property
+    def strain_relief_count(self) -> int:
+        """How many tabs bridge the cable channel over this link's length."""
+        return max(1, int(self.length_mm // self.strain_relief_pitch_mm))
+
+
+#: L1, the upper arm: shoulder pitch axis to elbow pitch axis.
+UPPER_ARM_LINK = LinkSpec(
+    name="L1 upper arm",
+    length_mm=DEFAULT_ARM.l1_upper_arm_mm,
+)
+
+
+@dataclass(frozen=True)
 class HardwareSpec:
     """
     Every off-the-shelf component the CAD needs, in one place.
@@ -1095,8 +1854,32 @@ class HardwareSpec:
     """
 
     base_yaw_servo: ServoSpec = field(default_factory=ServoSpec)
+    shoulder_pitch_servo: ServoSpec = field(default_factory=ServoSpec)
+    elbow_pitch_servo: ServoSpec = field(default_factory=ServoSpec)
+
+    #: Yaw thrust bearing, in the pedestal's turret. A 6806ZZ since D.2a - see
+    #: the note on :class:`BearingSpec`.
     thrust_bearing: BearingSpec = field(default_factory=BearingSpec)
+
+    #: Pivot bearing in the shoulder yoke's undriven side, opposite the servo.
+    #: The 608ZZ the yaw joint used to use, kept in the bill of materials.
+    shoulder_idler_bearing: BearingSpec = field(
+        default_factory=lambda: BEARING_608ZZ
+    )
+
+    #: Coupling between a servo shaft and the part it drives. One spec, used by
+    #: both the yaw turntable and the upper arm's shoulder end.
+    servo_horn: ServoHornSpec = field(default_factory=ServoHornSpec)
+
     base_stack: BaseStack = field(default_factory=BaseStack)
+
+    #: The three parts designed in Session D.2, between the pedestal and the
+    #: elbow.
+    yaw_turntable: YawTurntableSpec = field(default_factory=YawTurntableSpec)
+    shoulder_bracket: ShoulderBracketSpec = field(
+        default_factory=ShoulderBracketSpec
+    )
+    upper_arm_link: LinkSpec = field(default_factory=lambda: UPPER_ARM_LINK)
 
     #: Desk-edge clamp. Replaced the drilled M4 flange in Session D.1b: the
     #: user does not want holes in the desk, and a clamp is repositionable.
@@ -1120,6 +1903,57 @@ class HardwareSpec:
             raise ValueError(
                 "HardwareSpec: min_wall_thickness_mm must be positive, got "
                 f"{self.min_wall_thickness_mm}."
+            )
+        # ---- The height budget is stated twice; make it agree. ------------
+        # BaseStack owns the budget, the two part specs own the geometry. If
+        # they drift, the shoulder pivot silently stops landing on
+        # base_height_mm, which is exactly the class of error Session D.1d
+        # spent its time on.
+        if (
+            abs(
+                self.base_stack.turntable_plate_thickness_mm
+                - self.yaw_turntable.thickness_mm
+            )
+            > 1e-9
+        ):
+            raise ValueError(
+                f"HardwareSpec: BaseStack budgets "
+                f"{self.base_stack.turntable_plate_thickness_mm} mm for the "
+                f"turntable plate but YawTurntableSpec is "
+                f"{self.yaw_turntable.thickness_mm} mm thick."
+            )
+        if (
+            abs(
+                self.base_stack.shoulder_bracket_rise_mm
+                - self.shoulder_bracket.bracket_height_mm
+            )
+            > 1e-9
+        ):
+            raise ValueError(
+                f"HardwareSpec: BaseStack budgets "
+                f"{self.base_stack.shoulder_bracket_rise_mm} mm for the "
+                f"shoulder bracket but ShoulderBracketSpec rises "
+                f"{self.shoulder_bracket.bracket_height_mm} mm."
+            )
+        # ---- The horn has to fit the bearing it passes through. -----------
+        horn, bearing = self.servo_horn, self.thrust_bearing
+        if horn.disc_diameter_mm >= bearing.bore_diameter_mm:
+            raise ValueError(
+                f"HardwareSpec: the {horn.name} is "
+                f"{horn.disc_diameter_mm} mm across but the "
+                f"{bearing.name}'s bore is {bearing.bore_diameter_mm} mm. The "
+                "coupling sits inside the bore, so it cannot be wider than it. "
+                "Fit a smaller horn or a larger-bore bearing."
+            )
+        if horn.total_height_mm >= bearing.width_mm:
+            raise ValueError(
+                f"HardwareSpec: the {horn.name} stands "
+                f"{horn.total_height_mm} mm above the servo's shaft boss, "
+                f"which is the whole width of the {bearing.name} "
+                f"({bearing.width_mm} mm). The turntable would ride the horn "
+                "instead of the bearing. Fit a thinner horn, or lower the "
+                "servo in the turret - there is spare wall below the bearing "
+                "seat to spend."
             )
 
     @property
@@ -1178,19 +2012,36 @@ class HardwareSpec:
     def bill_of_materials(self) -> Tuple[str, ...]:
         """Off-the-shelf parts to buy, one human-readable line each."""
         clamp = self.desk_clamp
+        horn, idler = self.servo_horn, self.shoulder_idler_bearing
         return (
             f"1 x {self.base_yaw_servo.name} servo (base yaw)",
+            f"1 x {self.shoulder_pitch_servo.name} servo (shoulder pitch)",
+            f"1 x {self.elbow_pitch_servo.name} servo (elbow pitch)",
+            f"2 x {horn.name} ({horn.disc_diameter_mm:.0f} mm disc, "
+            f"{horn.bolt_count} x M{horn.bolt_nominal_diameter_mm:.0f} on a "
+            f"{horn.bolt_circle_mm:.0f} mm circle) - yaw turntable and "
+            f"shoulder",
             f"1 x {self.thrust_bearing.name} bearing "
             f"({self.thrust_bearing.bore_diameter_mm:.0f} x "
             f"{self.thrust_bearing.outer_diameter_mm:.0f} x "
-            f"{self.thrust_bearing.width_mm:.0f} mm)",
+            f"{self.thrust_bearing.width_mm:.0f} mm) - yaw thrust",
+            f"1 x {idler.name} bearing "
+            f"({idler.bore_diameter_mm:.0f} x "
+            f"{idler.outer_diameter_mm:.0f} x "
+            f"{idler.width_mm:.0f} mm) - shoulder yoke idler",
             f"1 x {clamp.bolt_thread} x {clamp.bolt_length_mm:.0f} mm hex-head "
             f"machine screw (DIN 933)",
             f"1 x {clamp.bolt_thread} hex nut (DIN 934), "
             f"{clamp.nut_across_flats_mm:.0f} mm across flats",
             f"1 x rubber anti-slip sheet, {clamp.pad_thickness_mm:.1f} mm thick "
             f"(cut 2 pads, glued into the jaw recesses)",
-            "4 x M3 screws (servo retention)",
+            "12 x M3 screws (servo retention, 4 per servo)",
+            f"{2 * horn.bolt_count} x "
+            f"M{horn.bolt_nominal_diameter_mm:.0f} socket-head screws "
+            f"(turntable and upper arm onto their horns)",
+            f"{self.yaw_turntable.bracket_bolt_count} x "
+            f"M{self.yaw_turntable.bracket_bolt_nominal_diameter_mm:.0f} "
+            f"screws (shoulder bracket onto the turntable)",
         )
 
     def hardware_report(self, arm: Optional[ArmGeometry] = None) -> str:
@@ -1223,6 +2074,31 @@ class HardwareSpec:
             f"    shoulder bracket   : "
             f"{self.base_stack.shoulder_bracket_rise_mm:.1f} mm\n"
             f"    -> pedestal        : {self.pedestal_height_mm(arm):.1f} mm\n"
+            f"\n"
+            f"  Yaw turntable        : {self.yaw_turntable.diameter_mm:.1f} mm "
+            f"dia x {self.yaw_turntable.thickness_mm:.1f} mm, bracket bolts on "
+            f"a {self.yaw_turntable.bracket_bolt_pattern_mm[0]:.0f} x "
+            f"{self.yaw_turntable.bracket_bolt_pattern_mm[1]:.0f} mm rectangle\n"
+            f"  Shoulder bracket     : "
+            f"{self.shoulder_bracket.base_plate_x_mm:.0f} x "
+            f"{self.shoulder_bracket.base_plate_y_mm:.0f} mm base, pitch axis "
+            f"{self.shoulder_bracket.bracket_height_mm:.1f} mm up, shaft "
+            f"{self.shoulder_bracket.shaft_direction}\n"
+            f"  Upper arm (L1)       : {self.upper_arm_link.length_mm:.0f} mm, "
+            f"{self.upper_arm_link.cross_section_width_mm:.0f} x "
+            f"{self.upper_arm_link.cross_section_height_mm:.0f} mm section, "
+            f"{self.upper_arm_link.wall_thickness_mm:.0f} mm walls\n"
+            f"    bending stress     : "
+            f"{self.upper_arm_link.bending_stress_mpa(arm.shoulder_moment_nm()):.2f} "
+            f"MPa at {arm.shoulder_moment_nm():.2f} N.m "
+            f"(allowable {PETG_ALLOWABLE_STRESS_MPA:.0f})\n"
+            f"    beam mass          : "
+            f"{self.upper_arm_link.estimated_mass_g():.0f} g of PETG\n"
+            f"  Servo horn           : {self.servo_horn.name}, "
+            f"{self.servo_horn.disc_diameter_mm:.1f} mm disc x "
+            f"{self.servo_horn.total_height_mm:.1f} mm tall, indexes every "
+            f"{self.servo_horn.index_resolution_deg:.1f} deg\n"
+            f"\n"
             f"  Print clearance      : {self.print_clearance_mm:.2f} mm/surface\n"
             f"  Min wall thickness   : {self.min_wall_thickness_mm:.1f} mm\n"
             f"\n"
@@ -1233,6 +2109,8 @@ class HardwareSpec:
             + "".join(f"    - {line}\n" for line in self.bill_of_materials())
             + f"\n"
             f"  !! {servo.unverified_report()}\n"
+            f"\n"
+            f"  !! {self.servo_horn.unverified_report()}\n"
         )
 
 

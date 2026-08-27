@@ -1,5 +1,5 @@
 """
-Test suite for the parametric CAD (Sessions D.1, D.1b and D.1c).
+Test suite for the parametric CAD (Sessions D.1 through D.2a).
 
 Test areas
 ----------
@@ -11,7 +11,9 @@ Test areas
 5. Pressure foot and knob parameter derivation and design rule checks
 6. Solid construction -- every part builds and has positive volume
 7. STL export -- valid binary STL, closed watertight mesh, nonzero volume,
-   checked for all three printable parts
+   checked for every printable part
+8. Yaw turntable (D.2a), including the horn/bearing compatibility rules that
+   forced the 608ZZ off the yaw axis
 
 The mesh checks parse the exported STL directly rather than trusting the
 kernel's own report, because "the STL is watertight" is a property of the
@@ -36,9 +38,17 @@ from src.geometry import (
     BaseStack,
     BearingSpec,
     DeskClampSpec,
+    BEARING_608ZZ,
     FastenerSpec,
     HardwareSpec,
+    PETG_ALLOWABLE_STRESS_MPA,
+    PETG_DENSITY_G_CM3,
+    PETG_TENSILE_YIELD_MPA,
+    STRUCTURAL_SAFETY_FACTOR,
+    ServoHornSpec,
     ServoSpec,
+    ShoulderBracketSpec,
+    YawTurntableSpec,
 )
 
 build123d = pytest.importorskip(
@@ -70,17 +80,25 @@ from cad.desk_clamp_pressure_foot import (  # noqa: E402
     build_pressure_foot,
     export_pressure_foot,
 )
+from cad.yaw_turntable import (  # noqa: E402
+    TurntableDesignError,
+    TurntableParameters,
+    build_turntable,
+    export_turntable,
+)
 
 #: Every printable part, so the mesh-integrity checks cover all of them.
 PART_EXPORTERS = {
     "base_pedestal": export_pedestal,
     "desk_clamp_knob": export_knob,
     "desk_clamp_pressure_foot": export_pressure_foot,
+    "yaw_turntable": export_turntable,
 }
 PART_BUILDERS = {
     "base_pedestal": build_pedestal,
     "desk_clamp_knob": build_knob,
     "desk_clamp_pressure_foot": build_pressure_foot,
+    "yaw_turntable": build_turntable,
 }
 
 
@@ -201,6 +219,24 @@ def meshes(stl_paths) -> dict:
     return {name: Mesh.from_binary_stl(path) for name, path in stl_paths.items()}
 
 
+def _greedy_hardware() -> HardwareSpec:
+    """
+    A hardware set whose base stack swallows the whole base height.
+
+    The turntable and bracket specs are inflated alongside BaseStack because
+    HardwareSpec refuses to hold a budget that disagrees with the parts it is
+    budgeting for -- which is the point of that cross-check, so the fixture
+    honours it rather than working around it.
+    """
+    return HardwareSpec(
+        base_stack=BaseStack(
+            turntable_plate_thickness_mm=60.0, shoulder_bracket_rise_mm=60.0
+        ),
+        yaw_turntable=YawTurntableSpec(thickness_mm=60.0),
+        shoulder_bracket=ShoulderBracketSpec(bracket_height_mm=60.0),
+    )
+
+
 @pytest.fixture(scope="module")
 def foot() -> PressureFootParameters:
     """Default pressure-foot parameters, derived from the geometry singletons."""
@@ -211,6 +247,12 @@ def foot() -> PressureFootParameters:
 def knob() -> KnobParameters:
     """Default knob parameters, derived from the geometry singletons."""
     return KnobParameters.from_geometry()
+
+
+@pytest.fixture(scope="module")
+def turntable() -> TurntableParameters:
+    """Default yaw-turntable parameters (Session D.2a)."""
+    return TurntableParameters.from_geometry()
 
 
 # =========================================================================
@@ -275,18 +317,66 @@ class TestHardwareSpecs:
         with pytest.raises(ValueError, match="must be positive"):
             ServoSpec(**kwargs)
 
-    def test_608zz_is_the_iso_standard_triple(self):
+    def test_yaw_bearing_is_the_standard_6806_triple(self):
         bearing = DEFAULT_HARDWARE.thrust_bearing
+        assert bearing.name == "6806ZZ"
         assert (
             bearing.bore_diameter_mm,
             bearing.outer_diameter_mm,
             bearing.width_mm,
+        ) == (30.0, 42.0, 7.0)
+
+    def test_608zz_survives_as_the_shoulder_idler(self):
+        """
+        D.2a moved the 608 off the yaw axis rather than deleting it.
+
+        Its bore could not pass a servo horn, but it is exactly right for the
+        shoulder yoke's undriven pivot, so it stays in the bill of materials.
+        """
+        idler = DEFAULT_HARDWARE.shoulder_idler_bearing
+        assert idler.name == "608ZZ"
+        assert (
+            idler.bore_diameter_mm,
+            idler.outer_diameter_mm,
+            idler.width_mm,
         ) == (8.0, 22.0, 7.0)
+        assert idler is not DEFAULT_HARDWARE.thrust_bearing
+
+    def test_the_yaw_bearing_kept_the_608s_width(self):
+        """
+        The swap was chosen to leave the height budget untouched.
+
+        A wider bearing would have eaten into BaseStack and moved the shoulder
+        pivot, which is the one number the whole stack is built to hit.
+        """
+        assert (
+            DEFAULT_HARDWARE.thrust_bearing.width_mm
+            == DEFAULT_HARDWARE.shoulder_idler_bearing.width_mm
+        )
 
     def test_bearing_seat_is_undersized_for_a_press_fit(self):
-        bearing = BearingSpec(outer_diameter_mm=22.0, press_fit_interference_mm=0.1)
+        bearing = BearingSpec(
+            bore_diameter_mm=8.0,
+            outer_diameter_mm=22.0,
+            inner_race_outer_diameter_mm=11.5,
+            press_fit_interference_mm=0.1,
+        )
         assert bearing.seat_diameter_mm == pytest.approx(21.9)
         assert bearing.seat_diameter_mm < bearing.outer_diameter_mm
+
+    def test_inner_race_land_lies_between_bore_and_outer_diameter(self):
+        bearing = DEFAULT_HARDWARE.thrust_bearing
+        assert (
+            bearing.bore_diameter_mm
+            < bearing.inner_race_outer_diameter_mm
+            < bearing.outer_diameter_mm
+        )
+        assert bearing.race_land_width_mm == pytest.approx(1.5)
+
+    @pytest.mark.parametrize("race_od", [30.0, 42.0, 8.0, 50.0])
+    def test_inner_race_outside_the_bore_and_od_rejected(self, race_od):
+        with pytest.raises(ValueError, match="inner_race_outer_diameter_mm"):
+            BearingSpec(inner_race_outer_diameter_mm=race_od)
 
     def test_bore_not_smaller_than_od_rejected(self):
         with pytest.raises(ValueError, match="0 < bore"):
@@ -382,18 +472,13 @@ class TestHardwareSpecs:
         )
 
     def test_stack_allowance_exceeding_base_height_rejected(self):
-        greedy = HardwareSpec(
-            base_stack=BaseStack(
-                turntable_plate_thickness_mm=60.0, shoulder_bracket_rise_mm=60.0
-            )
-        )
         with pytest.raises(ValueError, match="non-positive height"):
-            greedy.pedestal_height_mm()
+            _greedy_hardware().pedestal_height_mm()
 
     def test_hardware_report_surfaces_the_verification_warning(self):
         report = DEFAULT_HARDWARE.hardware_report()
         assert "UNVERIFIED" in report
-        assert "608ZZ" in report and "DS3218" in report
+        assert "6806ZZ" in report and "DS3218" in report
 
     def test_bill_of_materials_lists_the_clamp_fasteners(self):
         """The M4 desk screws are gone; the clamp hardware replaced them."""
@@ -974,7 +1059,7 @@ class TestParameterDerivation:
         assert params.cavity_x_span_mm == pytest.approx(20.5)
         assert params.ear_shelf_z_mm == pytest.approx(49.0)
         assert params.cavity_top_z_mm == pytest.approx(59.0)
-        assert params.bearing_seat_diameter_mm == pytest.approx(21.9)
+        assert params.bearing_seat_diameter_mm == pytest.approx(41.9)
 
     def test_pads_flank_the_cavity_opening(self, params):
         """
@@ -1072,13 +1157,8 @@ class TestParameterDerivation:
 
 class TestDesignRuleChecks:
     def test_stack_allowance_exceeding_base_height_reports_negative_height(self):
-        greedy = HardwareSpec(
-            base_stack=BaseStack(
-                turntable_plate_thickness_mm=60.0, shoulder_bracket_rise_mm=60.0
-            )
-        )
         with pytest.raises(PedestalDesignError) as excinfo:
-            PedestalParameters.from_geometry(hardware=greedy)
+            PedestalParameters.from_geometry(hardware=_greedy_hardware())
         assert excinfo.value.status is DesignStatus.NEGATIVE_HEIGHT
 
     def test_servo_too_tall_for_the_turret_is_caught(self):
@@ -1401,7 +1481,303 @@ class TestKnob:
 
 
 # =========================================================================
-# 8. Shared primitives
+# 8. Session D.2a -- servo horn and yaw turntable
+# =========================================================================
+
+
+class TestServoHornSpec:
+    """
+    The coupling that made D.2a rewrite the yaw bearing.
+
+    Its disc diameter is what an 8 mm bore could not pass, and its height is
+    what the turntable's spigot cap has to be left over from.
+    """
+
+    def test_spline_diameter_is_the_verified_number(self):
+        horn = DEFAULT_HARDWARE.servo_horn
+        assert horn.spline_teeth == 25
+        assert horn.spline_diameter_mm == pytest.approx(5.9)
+        assert "spline_diameter_mm" not in horn.UNVERIFIED_FIELDS
+
+    def test_horn_geometry_is_flagged_unverified(self):
+        horn = DEFAULT_HARDWARE.servo_horn
+        assert horn.UNVERIFIED_FIELDS
+        for field_name in horn.UNVERIFIED_FIELDS:
+            assert hasattr(horn, field_name)
+        assert "UNVERIFIED" in horn.unverified_report()
+
+    def test_spline_is_far_too_fine_to_print(self):
+        """
+        The reason a bought horn is in the bill of materials at all.
+
+        25 teeth on a 5.9 mm circle is a 0.74 mm pitch -- under two extrusion
+        widths at a 0.4 mm nozzle.
+        """
+        horn = DEFAULT_HARDWARE.servo_horn
+        assert horn.spline_tooth_pitch_mm == pytest.approx(0.741, abs=0.005)
+        assert horn.spline_tooth_pitch_mm < 2 * 0.4
+
+    def test_index_resolution_is_the_spline_step(self):
+        assert DEFAULT_HARDWARE.servo_horn.index_resolution_deg == pytest.approx(14.4)
+
+    def test_total_height_is_hub_plus_disc(self):
+        horn = DEFAULT_HARDWARE.servo_horn
+        assert horn.total_height_mm == pytest.approx(
+            horn.hub_height_mm + horn.disc_thickness_mm
+        )
+
+    def test_bolt_positions_lie_on_the_bolt_circle(self):
+        horn = DEFAULT_HARDWARE.servo_horn
+        positions = horn.bolt_positions()
+        assert len(positions) == horn.bolt_count
+        for x, y in positions:
+            assert math.hypot(x, y) == pytest.approx(horn.bolt_circle_mm / 2.0)
+
+    def test_bolt_circle_wider_than_the_disc_rejected(self):
+        with pytest.raises(ValueError, match="must be smaller than the disc"):
+            ServoHornSpec(bolt_circle_mm=30.0)
+
+    def test_rim_too_thin_for_the_bolt_rejected(self):
+        with pytest.raises(ValueError, match="of rim outside the bolt circle"):
+            ServoHornSpec(bolt_circle_mm=22.0)
+
+    def test_hub_narrower_than_its_spline_rejected(self):
+        with pytest.raises(ValueError, match="wider than the spline"):
+            ServoHornSpec(hub_diameter_mm=5.0)
+
+    @pytest.mark.parametrize("count", [0, 1, 2])
+    def test_too_few_bolts_rejected(self, count):
+        with pytest.raises(ValueError, match="at least 3"):
+            ServoHornSpec(bolt_count=count)
+
+
+class TestHornBearingCompatibility:
+    """
+    The D.2a finding, pinned as an invariant.
+
+    The coupling passes through the bearing's bore, so the bearing has to be
+    bigger than the horn in both directions. A 608 fails both tests, which is
+    why it is no longer the yaw bearing.
+    """
+
+    def test_the_horn_fits_through_the_yaw_bearings_bore(self):
+        horn, bearing = DEFAULT_HARDWARE.servo_horn, DEFAULT_HARDWARE.thrust_bearing
+        assert horn.disc_diameter_mm < bearing.bore_diameter_mm
+
+    def test_the_horn_is_shorter_than_the_bearing_is_wide(self):
+        horn, bearing = DEFAULT_HARDWARE.servo_horn, DEFAULT_HARDWARE.thrust_bearing
+        assert horn.total_height_mm < bearing.width_mm
+
+    def test_a_608_yaw_bearing_is_rejected_for_the_horn_it_cannot_pass(self):
+        """
+        The original design, re-run. It fails loudly instead of quietly.
+
+        This is the whole of Session D.2a's first finding in one assertion: an
+        8 mm bore cannot pass a 25 mm horn, so a stack built on a 608 has
+        nowhere to put the coupling between the servo and the turntable.
+        """
+        with pytest.raises(ValueError, match="coupling sits inside the bore"):
+            HardwareSpec(thrust_bearing=BEARING_608ZZ)
+
+    def test_a_horn_taller_than_the_bearing_is_rejected(self):
+        tall = ServoHornSpec(hub_height_mm=5.0, disc_thickness_mm=5.0)
+        with pytest.raises(ValueError, match="ride the horn"):
+            HardwareSpec(servo_horn=tall)
+
+
+class TestYawTurntableParameters:
+    def test_default_parameters_validate(self, turntable):
+        assert turntable.validate() is DesignStatus.OK
+
+    def test_dimensions_come_from_the_geometry_singletons(self, turntable):
+        spec = DEFAULT_HARDWARE.yaw_turntable
+        assert turntable.diameter_mm == spec.diameter_mm
+        assert turntable.thickness_mm == spec.thickness_mm
+        assert turntable.race_relief_depth_mm == spec.bearing_race_recess_mm
+
+    def test_plate_thickness_matches_the_height_budget(self, turntable):
+        """The same 6 mm counted once in BaseStack and once in the part."""
+        assert turntable.thickness_mm == pytest.approx(
+            DEFAULT_HARDWARE.base_stack.turntable_plate_thickness_mm
+        )
+
+    def test_turntable_covers_pedestal_bearing(self, turntable):
+        """
+        The plate has to cover the bearing it turns on -- not the turret.
+
+        D.2a's brief asked for a plate wider than "the pedestal turret top".
+        The turret is not round: it is 49.9 x 66.2 mm, an 82.9 mm diagonal, so
+        a disc that covered it would overhang the 60 mm-deep top arm it stands
+        on. What the plate must actually cover is the bearing, and it does.
+        """
+        bearing = DEFAULT_HARDWARE.thrust_bearing
+        assert turntable.diameter_mm > bearing.outer_diameter_mm
+        assert turntable.diameter_mm >= (
+            turntable.race_relief_outer_diameter_mm
+            + 2.0 * DEFAULT_HARDWARE.min_wall_thickness_mm
+        )
+
+    def test_turntable_horn_pattern_matches_servo(self, turntable):
+        horn = DEFAULT_HARDWARE.servo_horn
+        assert turntable.horn_bolt_count == horn.bolt_count
+        assert turntable.horn_bolt_circle_mm == horn.bolt_circle_mm
+        for (tx, ty), (hx, hy) in zip(
+            turntable.horn_bolt_positions, horn.bolt_positions()
+        ):
+            assert (tx, ty) == pytest.approx((hx, hy))
+        assert turntable.horn_pocket_diameter_mm == pytest.approx(
+            horn.disc_diameter_mm + 2.0 * DEFAULT_HARDWARE.print_clearance_mm
+        )
+        assert turntable.horn_pocket_depth_mm == pytest.approx(horn.total_height_mm)
+
+    def test_spigot_is_a_slip_fit_in_the_bore(self, turntable):
+        bearing = DEFAULT_HARDWARE.thrust_bearing
+        assert turntable.spigot_diameter_mm < bearing.bore_diameter_mm
+        assert turntable.spigot_diameter_mm == pytest.approx(
+            bearing.bore_diameter_mm
+            - DEFAULT_HARDWARE.yaw_turntable.spigot_bore_fit_mm
+        )
+        assert turntable.spigot_depth_mm == pytest.approx(bearing.width_mm)
+
+    def test_relief_clears_the_outer_race_and_lands_on_the_inner(self, turntable):
+        """
+        The correction to D.2a's ``bearing_race_recess_mm``.
+
+        A plain 1 mm recess over a bearing standing 0.5 mm proud would drop the
+        plate onto the printed turret face and leave the bearing carrying
+        nothing. It only works as a relief over the *outer* ring, with the land
+        inside it bearing on the inner ring.
+        """
+        bearing = DEFAULT_HARDWARE.thrust_bearing
+        assert turntable.race_relief_depth_mm > bearing.proud_mm
+        assert turntable.race_relief_inner_diameter_mm == pytest.approx(
+            bearing.inner_race_outer_diameter_mm
+        )
+        assert turntable.race_land_width_mm > 0.0
+
+    def test_spigot_cap_is_what_the_horn_leaves_of_the_bearing_width(self, turntable):
+        horn, bearing = DEFAULT_HARDWARE.servo_horn, DEFAULT_HARDWARE.thrust_bearing
+        assert turntable.spigot_cap_mm == pytest.approx(
+            bearing.width_mm - horn.total_height_mm
+        )
+        assert turntable.spigot_cap_mm > 0.0
+
+    def test_ring_around_the_horn_pocket_is_the_tightest_feature(self, turntable):
+        """
+        2 mm, exactly the floor -- worth a test so a change cannot slip past.
+
+        Half the minimum wall is allowed because the ring is confined by the
+        steel race over its whole height, the same allowance the pressure
+        foot's rim takes.
+        """
+        floor = DEFAULT_HARDWARE.min_wall_thickness_mm / 2.0
+        assert turntable.spigot_ring_wall_mm >= floor
+        assert turntable.spigot_ring_wall_mm < DEFAULT_HARDWARE.min_wall_thickness_mm
+
+    def test_bracket_bolts_clear_the_bearing_and_the_rim(self, turntable):
+        assert turntable.bracket_bolt_clearance_to_bearing_mm > 0.0
+        assert (
+            turntable.rim_outside_bracket_bolts_mm
+            >= DEFAULT_HARDWARE.min_wall_thickness_mm
+        )
+
+    def test_bracket_bolts_are_blind_so_nothing_protrudes_underneath(self, turntable):
+        """
+        There is only ``BearingSpec.proud_mm`` under the plate.
+
+        A nut or a screw tip poking through would foul the turret half a
+        millimetre below, so the holes stop short and keep a floor.
+        """
+        assert turntable.bracket_bolt_floor_mm > 0.0
+        assert (
+            turntable.bracket_bolt_depth_mm < turntable.thickness_mm
+        )
+
+    def test_report_names_the_key_dimensions(self, turntable):
+        report = turntable.report()
+        for token in ("Spigot", "Horn pocket", "Outer-race relief", "witness"):
+            assert token in report
+
+
+class TestYawTurntableDesignRules:
+    def test_shallow_relief_that_would_miss_the_bearing_is_rejected(self, turntable):
+        broken = replace(turntable, race_relief_depth_mm=0.25)
+        with pytest.raises(TurntableDesignError) as excinfo:
+            broken.validate()
+        assert excinfo.value.status is DesignStatus.FEATURE_COLLISION
+
+    def test_relief_starting_inside_the_spigot_is_rejected(self, turntable):
+        broken = replace(turntable, race_relief_inner_diameter_mm=20.0)
+        with pytest.raises(TurntableDesignError) as excinfo:
+            broken.validate()
+        assert excinfo.value.status is DesignStatus.FEATURE_COLLISION
+
+    def test_horn_taller_than_the_spigot_is_rejected(self, turntable):
+        broken = replace(turntable, horn_pocket_depth_mm=turntable.spigot_depth_mm)
+        with pytest.raises(TurntableDesignError) as excinfo:
+            broken.validate()
+        assert excinfo.value.status is DesignStatus.FEATURE_COLLISION
+
+    def test_thin_ring_around_the_horn_pocket_is_rejected(self, turntable):
+        broken = replace(
+            turntable, horn_pocket_diameter_mm=turntable.spigot_diameter_mm - 1.0
+        )
+        with pytest.raises(TurntableDesignError) as excinfo:
+            broken.validate()
+        assert excinfo.value.status is DesignStatus.WALL_TOO_THIN
+
+    def test_bracket_bolts_over_the_bearing_are_rejected(self, turntable):
+        broken = replace(turntable, bracket_bolt_pattern_mm=(30.0, 10.0))
+        with pytest.raises(TurntableDesignError) as excinfo:
+            broken.validate()
+        assert excinfo.value.status is DesignStatus.FEATURE_COLLISION
+
+    def test_bracket_bolts_too_near_the_rim_are_rejected(self, turntable):
+        broken = replace(turntable, bracket_bolt_pattern_mm=(65.0, 10.0))
+        with pytest.raises(TurntableDesignError) as excinfo:
+            broken.validate()
+        assert excinfo.value.status is DesignStatus.WALL_TOO_THIN
+
+    def test_bracket_bolts_breaking_through_the_plate_are_rejected(self, turntable):
+        broken = replace(turntable, bracket_bolt_depth_mm=turntable.thickness_mm)
+        with pytest.raises(TurntableDesignError) as excinfo:
+            broken.validate()
+        assert excinfo.value.status is DesignStatus.FEATURE_COLLISION
+
+    def test_counterbore_breaking_out_of_the_ring_is_rejected(self, turntable):
+        broken = replace(turntable, horn_counterbore_diameter_mm=14.0)
+        with pytest.raises(TurntableDesignError) as excinfo:
+            broken.validate()
+        assert excinfo.value.status is DesignStatus.FEATURE_COLLISION
+
+    @pytest.mark.parametrize(
+        "kwargs",
+        [{"diameter_mm": 0.0}, {"thickness_mm": -1.0}, {"spigot_depth_mm": 0.0}],
+    )
+    def test_non_positive_dimensions_rejected(self, turntable, kwargs):
+        with pytest.raises(TurntableDesignError):
+            replace(turntable, **kwargs).validate()
+
+    def test_build_rejects_invalid_parameters(self, turntable):
+        with pytest.raises(TurntableDesignError):
+            build_turntable(replace(turntable, race_relief_depth_mm=0.1))
+
+
+class TestYawTurntableSolid:
+    def test_bounding_box_spans_plate_and_spigot(self, turntable):
+        box = build_turntable(turntable).bounding_box()
+        assert box.max.Z == pytest.approx(turntable.thickness_mm)
+        assert box.min.Z == pytest.approx(-turntable.spigot_depth_mm)
+        assert box.max.X - box.min.X == pytest.approx(turntable.diameter_mm, abs=0.2)
+
+    def test_horn_pocket_actually_removes_material(self, turntable):
+        solid = build_turntable(turntable)
+        shallow = replace(turntable, horn_pocket_depth_mm=1.0)
+        assert solid.volume < build_turntable(shallow).volume
+
+
+# =========================================================================
+# 9. Shared primitives
 # =========================================================================
 
 
