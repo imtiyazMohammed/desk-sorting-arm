@@ -361,6 +361,12 @@ def build_assembly(
     # Not printed, but drawn: the half-millimetre the yaw bearing holds the
     # turntable off the turret is the whole reason that underside is stepped,
     # and a gap with nothing in it reads as an error.
+    #
+    # Each is drawn at its true outside diameter, so the yaw bearing overlaps
+    # its seat by a 0.05 mm shell. That is the press fit
+    # (BearingSpec.press_fit_interference_mm), not a positioning error, and it
+    # is why the collision test covers the printed parts only. The bearings'
+    # placement is checked separately, against the seats they sit in.
     def bearing_ring(bearing) -> Part:
         return Cylinder(
             radius=bearing.outer_diameter_mm / 2.0,
@@ -377,10 +383,18 @@ def build_assembly(
         base_y,
         pedestal_params.turret_top_z_mm - pedestal_params.bearing_seat_depth_mm,
     ) * bearing_ring(hardware.thrust_bearing)
+    # The idler sits in the yoke's far flange, whose seat is cut inward from
+    # that flange's inner face -- so the ring starts a full bearing width
+    # further out, not at the face itself.
+    idler = hardware.shoulder_idler_bearing
     idler_solid = upright(
-        Pos(0, -upper_arm_params.driven_flange_inner_y_mm, 0)
+        Pos(
+            0,
+            -(upper_arm_params.driven_flange_inner_y_mm + idler.width_mm),
+            0,
+        )
         * Rot(-90, 0, 0)
-        * bearing_ring(hardware.shoulder_idler_bearing),
+        * bearing_ring(idler),
         shoulder_z,
     )
 

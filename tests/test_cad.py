@@ -2741,6 +2741,58 @@ class TestAssemblyPreview:
                 "zero pose"
             )
 
+    def test_the_bearings_sit_in_the_seats_cut_for_them(self, assembly):
+        """
+        Scenery, but placed -- and the only overlap allowed is the press fit.
+
+        Both bearings are drawn at their true outside diameter while their
+        seats are cut ``press_fit_interference_mm`` under it, so each one
+        overlaps its housing by a thin shell. Checking that the overlap equals
+        that shell, rather than merely that it is small, means a bearing drawn
+        a whole width out of position still fails.
+        """
+        pedestal = PedestalParameters.from_geometry()
+        yaw = DEFAULT_HARDWARE.thrust_bearing
+        box = assembly.by_name("yaw bearing").solid.bounding_box()
+        assert box.min.Z == pytest.approx(pedestal.servo_shaft_output_z_mm)
+        assert box.max.Z == pytest.approx(pedestal.bearing_top_z_mm)
+
+        def press_fit_annulus_mm3(bearing, engaged_depth_mm: float) -> float:
+            """The exact annulus between the bearing's OD and its seat."""
+            return (
+                math.pi
+                / 4.0
+                * (bearing.outer_diameter_mm**2 - bearing.seat_diameter_mm**2)
+                * engaged_depth_mm
+            )
+
+        # The yaw bearing is only housed over its seat depth; the rest of its
+        # width stands proud of the turret, with nothing around it.
+        overlap = (
+            assembly.by_name("yaw bearing").solid
+            & assembly.by_name("base_pedestal").solid
+        ).volume
+        assert overlap == pytest.approx(
+            press_fit_annulus_mm3(yaw, yaw.seat_depth_mm), rel=0.01
+        )
+
+        # The idler sits in the upper arm's far flange, whose seat is cut
+        # inward from that flange's inner face -- a full bearing width beyond
+        # where the horn face sits on the driven side.
+        idler = DEFAULT_HARDWARE.shoulder_idler_bearing
+        overlap = (
+            assembly.by_name("idler bearing").solid
+            & assembly.by_name("L1 upper arm").solid
+        ).volume
+        # The idler's seat is a blind pocket, so its whole width is engaged.
+        assert overlap == pytest.approx(
+            press_fit_annulus_mm3(idler, idler.width_mm), rel=0.01
+        )
+        assert (
+            assembly.by_name("idler bearing").solid
+            & assembly.by_name("shoulder idler plug").solid
+        ).volume == pytest.approx(0.0, abs=1e-6)
+
     def test_upper_stack_is_continuous_from_turret_to_elbow(self, assembly):
         """
         Nothing floats. Each part's underside meets the one below it, with the
