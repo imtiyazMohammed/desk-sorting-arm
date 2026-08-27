@@ -28,6 +28,9 @@ desk, edit `src/geometry.py`. Do not edit `cad/base_pedestal.py`.
 python3 -m cad.base_pedestal               # -> cad/output/base_pedestal.stl
 python3 -m cad.desk_clamp_knob             # -> cad/output/desk_clamp_knob.stl
 python3 -m cad.desk_clamp_pressure_foot    # -> cad/output/desk_clamp_pressure_foot.stl
+python3 -m cad.yaw_turntable               # -> cad/output/yaw_turntable.stl
+python3 -m cad.shoulder_bracket            # -> shoulder_bracket.stl + shoulder_idler_plug.stl
+python3 -m cad.upper_arm                   # -> cad/output/upper_arm.stl
 python3 -m cad.assembly_preview            # -> assembly_preview.stl + .png
 ```
 
@@ -126,18 +129,18 @@ gusset_size`). `test_the_gusset_defines_where_the_desk_stops` holds it.
 
 | | |
 |---|---|
-| Overall envelope | 80.00 (X) × 82.50 (Y) × 130.00 (Z) mm |
+| Overall envelope | 80.00 (X) × 82.50 (Y) × 129.50 (Z) mm |
 | Desk seats at | x = −30.00 mm (yaw axis at x = 0) |
 | Top arm | x −35 … +30, z 0 … 15 |
 | Spine | x −50 … −35, z −60 … +15 |
 | Bottom arm | x −35 … +30, z −60 … −45 |
 | Throat | 45.0 mm, for 15–35 mm desks |
-| Servo turret | x ±14.95, y −41.25 … +21.25, z 15 … 70 |
+| Servo turret | x ±24.95, y −41.25 … +24.95, z 15 … 69.5 |
 | Servo cavity | 20.50 (X) × 40.50 (Y) body, 54.50 (Y) ear slot |
-| Bearing seat | Ø21.90 × 6.50 mm deep |
+| Bearing seat | Ø41.90 × 6.50 mm deep (6806ZZ since D.2a) |
 | Anti-slip pads | 2 × 15.75 × 78.50 mm, 2.0 mm deep (2473 mm²) |
 | Clamp screw | Ø9.00 through the bottom arm at x = −16.00 |
-| Volume | ≈ 285 cm³ |
+| Volume | ≈ 356 cm³ |
 
 **Coordinate frame.** The origin is on the yaw axis at the **desk's top
 surface**, so `z = 0` is the desk plane and `+X` points inward over the desk.
@@ -201,9 +204,13 @@ inverted. Fit it as the clamp goes on; once the pad meets the desk it stays put.
 **Why it stayed 50 mm.** The knob was scheduled to shrink to 30 mm, on the
 grounds that a large knob lets a hand exceed the printed jaw's 3.9 N·m limit.
 That limit belonged to D.1b's cantilever wing. The U-clamp's bottom arm takes
-**11.62 N·m** and a 50 mm knob reaches only 1.00 N·m — 11.6× of headroom — so
+**7.89 N·m** and a 50 mm knob reaches only 1.00 N·m — 7.9× of headroom — so
 there is nothing left to protect against, while shrinking would have cut the
-grip margin from 2.39× to 1.43×. The shrink was cancelled.
+grip margin from 3.51× to 2.11×. The shrink was cancelled.
+
+(Those two figures were 11.62 N·m and 2.39× when the shrink was cancelled in
+D.1c; D.1d's corrected friction model moved both. The conclusion is unchanged —
+the headroom is smaller but still far beyond a hand.)
 
 **The bearing boss is gone (D.1d).** It was added in D.1b, where the knob bore
 against the upper jaw and collar friction there ate much of the hand torque. In
@@ -213,6 +220,135 @@ friction term it justified was modelling a contact that does not exist.
 
 Print **socket-face down**: no support needed and the gripping surfaces come
 out crisp.
+
+### `yaw_turntable.py` — D.2a
+
+| | |
+|---|---|
+| Plate | Ø68.00 × 6.00 mm |
+| Spigot in the bearing bore | Ø29.50 × 7.00 mm |
+| Horn pocket | Ø25.50 × 6.00 mm deep, 2.00 mm ring wall |
+| Outer-race relief | Ø33.00 … Ø42.50 × 1.00 mm deep |
+| Land on the inner ring | 1.75 mm wide |
+| Horn screws | 4 × Ø3.40 on a Ø16 circle, counterbored Ø6.00 × 3.50 |
+| Bracket screws | 4 × Ø2.50 blind × 4.00 mm on a 52 × 20 mm rectangle |
+| Volume | ≈ 22 cm³ (28 g) |
+
+**Origin on the land plane** — the face that touches the bearing's inner ring —
+which is desk-frame z = 70.0. The plate sits above it, the spigot hangs below.
+
+**Why the underside is stepped.** The bearing stands 0.5 mm proud of the
+turret. A flat underside would land on the printed turret face; a plain recess
+deeper than 0.5 mm would do the same while also clearing the inner ring. So the
+relief covers the **outer** ring only and the plate lands on the inner ring
+inside it. That is what makes the bearing a bearing rather than a spacer, and
+it is the correction to the brief's `bearing_race_recess_mm`.
+
+**Why the bolt pattern is a rectangle, not a circle.** The screws must clear
+the bearing relief (radius 21.25 mm) *and* miss the bracket's two walls, which
+stand on the plate between y = 15.5 and 21.5 mm. A circle large enough for the
+first crosses the second at every phase angle unless its diameter passes 66 mm,
+by which point it is off the plate. A 52 × 20 mm rectangle satisfies both and
+leaves all four heads reachable from above, between the walls.
+
+**Why the plate is Ø68 and not "slightly larger than the turret".** The turret
+is not round: 49.9 × 66.2 mm, an 82.9 mm diagonal. A disc that covered it would
+overhang the 60 mm-deep top arm it stands on. What the plate has to cover is
+the bearing, and Ø68 does that with 13 mm of rim.
+
+**The yaw-zero mark is a witness notch, not a key.** A true key is impossible
+against a round horn whose four holes sit on a square — the pattern is
+symmetric under 90° rotation, so any mating feature fits four ways, and keying
+it would mean filing a flat on a bought part. The notch in the rim lines up
+with the turret's front face at yaw zero.
+
+**Tightest feature: the 2.00 mm ring** between the horn pocket and the bearing
+bore, exactly at its floor of half the minimum wall. Half is allowed because
+the ring is confined by the steel race over its whole height — the same
+allowance the pressure foot's rim takes. A horn narrower than Ø25 (Ø19.7 is
+also sold) doubles the margin.
+
+### `shoulder_bracket.py` — D.2b
+
+| | |
+|---|---|
+| Base plate | x −40.25 … +31.75, y ±21.50, 6.00 mm thick |
+| Walls | x −40.25 … +20.25, z 6.00 … 34.50, inner faces at y ±15.50, 6.00 mm thick |
+| Servo slot | 40.50 (X) × 31.00 (Y) × 20.50 (Z) mm, open at the top |
+| Servo screws | 4 × Ø3.00 blind × 4.50 mm |
+| Pitch axis | z = 24.00 local, **100.000 mm above the desk** |
+| Horn face | y = 35.50 mm |
+| Volume | ≈ 30 cm³ (38 g), plus the idler plug at ≈ 11 cm³ (13 g) |
+
+**The reason the part exists** is the last line of that table. Pedestal 69.5 +
+bearing proud 0.5 + turntable 6.0 + this rise 24.0 = 100.000 mm, which
+`test_shoulder_shaft_height_matches_base_height` checks against
+`ArmGeometry.base_height_mm` rather than against a copy of the number.
+
+**The servo lies on its side because it must.** Stood on end, its ears are
+49.5 mm apart along the body, so at a 24 mm rise the lower one lands 0.75 mm
+*below* the turntable the bracket is bolted to. Laid down, the 20 mm width
+straddles the axis from 14 to 34 mm and both ears are reachable — and every
+part of the bracket stays within 47 mm of the pitch axis, which is what lets
+the upper arm's yoke swing.
+
+**Both walls are identical.** The undriven one takes the idler plug today; a
+reduction plate or an alternative actuator bolts to the same four holes.
+See the limit on the twin-servo option in `docs/PROOF_OF_CONCEPT.md` §2.3.
+
+**The cable leaves at the rear, not down the yaw axis.** The yaw servo's shaft
+and its horn fill that axis solid from the turret to the turntable's cap, so
+the notch is in the base plate's rear edge, outside the turntable's rim. Allow
+a service loop for ±135° of yaw travel.
+
+The base plate overhangs the turntable by about 12 mm at its rear corners. That
+is expected, not a modelling error: the plate is sized by the servo's 54.5 mm
+flange and the disc by the bearing, and the bolt pattern that carries the load
+sits well inside the disc.
+
+### `upper_arm.py` — D.2c
+
+| | |
+|---|---|
+| Axis to axis | 400.00 mm (`ArmGeometry.l1_upper_arm_mm`) |
+| Beam section | 40.00 (Y) × 25.00 (Z) mm, 3.00 mm walls, hollow |
+| Beam run | x 49.16 … 365.75 |
+| Driven flange | y 35.50 … 41.50, Ø36.00, horn recess + 4 counterbored screws |
+| Idler flange | y −45.50 … −35.50, Ø21.90 × 7.00 bearing seat |
+| Yoke width | 87.00 mm overall |
+| Elbow housing | x 365.75 … 414.25, y ±21.50, z ±14.25 |
+| Cable trough | 8 × 8 mm open channel on the top face, 3 strain-relief tabs |
+| Volume | ≈ 209 cm³ (265 g) |
+
+**A yoke, not a flange.** The shoulder horn's face is 35.5 mm off the yaw axis,
+so a link hung off one flange would centre roughly 50 mm to one side — and
+`forward_kinematics.py` models no shoulder offset, so that would become
+systematic error in every computed TCP position. Two flanges straddle the
+bracket: the driven side bolts to the horn, the undriven side runs the 608ZZ
+on the idler plug's axle.
+
+**Stress is not what sizes the section.** At the 3.26 N·m worst-case shoulder
+moment the section carries **1.25 MPa** against a 25 MPa allowable — 20× — and
+deflects about 2.7 mm. The section is kept because it is stiff and it packages
+the elbow servo's cabling. Its cost is mass: 265 g, which is most of what §2.2
+budgeted for the entire arm's plastic.
+
+**The 3 mm wall is an explicit exception to `min_wall_thickness_mm`.** The 4 mm
+floor was set for the clamp's load-bearing walls; 3 mm is still seven
+perimeters at a 0.4 mm nozzle, and taking these walls to 4 mm would add ~29 %
+to the mass of a link with a 20× stress margin.
+
+**The trough stands on the beam rather than being cut into it.** An 8 mm
+channel sunk into a 3 mm top wall does not stay a channel — it breaks through
+into the hollow and turns a closed box into an open section, losing roughly
+sixty times its torsional stiffness. The trough is a raised U instead, so the
+channel is still open for wires to drop into and the box below is intact.
+
+**The elbow servo does not fit inside the beam.** Its smallest dimension is
+20 mm and its largest is 40.5; a 40 × 25 mm section cannot swallow it in any
+orientation once walls are counted. The distal end swells into a housing built
+the same way as the shoulder bracket — two walls, a top-open slot, four blind
+screws — so `L2` will straddle it exactly as `L1` straddles the shoulder.
 
 ---
 
@@ -240,7 +376,7 @@ arm can carry is unchanged at 4834 N. Hand torque still cannot reach it.
 **The U-profile inverts the old design's weakness.** D.1b's side wing yielded
 at 3.9 N·m — below what a hand could apply — so `cad/README.md` had to carry a
 "do not use a wrench" warning. A 15 mm bottom arm spanning the full 82.5 mm
-width takes 11.62 N·m, which no hand can reach through a knob this size. That
+width takes 7.89 N·m, which no hand can reach through a knob this size. That
 is a structural guarantee rather than an instruction, and
 `test_hand_cannot_overstress_the_u_clamp` holds it.
 
@@ -281,6 +417,30 @@ a `DesignStatus` from `cad/_design.py`.
 | Hex socket does not pierce the knob | `FEATURE_COLLISION` |
 | Bearing boss leaves a wall around the bore | `WALL_TOO_THIN` |
 | Flutes do not cut into the socket or reach the boss | `WALL_TOO_THIN` |
+| **Yaw turntable** | |
+| Race relief deeper than the bearing stands proud | `FEATURE_COLLISION` |
+| Relief starts outside the spigot, leaving a land | `FEATURE_COLLISION` |
+| Horn shorter than the bearing is wide, leaving a cap | `FEATURE_COLLISION` |
+| Ring around the horn pocket >= half the minimum wall | `WALL_TOO_THIN` |
+| Horn counterbores stay inside that ring | `FEATURE_COLLISION` |
+| Bracket bolts clear the bearing and keep a rim | `FEATURE_COLLISION` / `WALL_TOO_THIN` |
+| Bracket bolts stay blind, with a floor above the bearing | `FEATURE_COLLISION` |
+| **Shoulder bracket** | |
+| The stack lands the pitch axis on `base_height_mm` | `INVALID_PARAMETER` |
+| Servo clears the base plate, and its ears are reachable | `FEATURE_COLLISION` |
+| Servo screws land in wall, not in the slot | `FEATURE_COLLISION` |
+| Blind servo screws keep a floor in the wall | `WALL_TOO_THIN` |
+| Walls stand within the base plate | `FEATURE_COLLISION` |
+| Turntable screws miss the walls and keep an edge | `FEATURE_COLLISION` / `WALL_TOO_THIN` |
+| Cable slot misses the walls and the screws | `FEATURE_COLLISION` |
+| Idler axle long enough to reach its bearing | `INVALID_PARAMETER` |
+| **Upper arm** | |
+| Bending stress below the PETG allowable | `INVALID_PARAMETER` |
+| Beam starts outside everything the bracket occupies | `FEATURE_COLLISION` |
+| Yoke flanges clear the beam's width | `FEATURE_COLLISION` |
+| Flanges leave a wall around horn recess and bearing seat | `WALL_TOO_THIN` |
+| Elbow housing does not overlap the yoke | `FEATURE_COLLISION` |
+| Cable trough narrower than the beam it stands on | `FEATURE_COLLISION` |
 
 Note the screw-length check keys off the **thinnest** desk, not the thickest: a
 thin desk sits high in the throat, so its underside is furthest from the bottom
@@ -338,6 +498,32 @@ top pointing at the desk. Wind it down so the foot sits low in the throat.
 3. Turn the knob until firm. The bottom arm cannot be over-stressed by hand, so
    "firm" is enough — there is no torque warning to observe on this design.
 
+### 7. Build the base stack (D.2)
+
+1. Press the **6806ZZ** into the turret's top face. It should stand 0.5 mm
+   proud; that gap is what the turntable rides on.
+2. Fit a **25T round horn** to the yaw servo's spline and drive its retaining
+   screw. Note which spline tooth you used — the coupling re-indexes in 14.4°
+   steps.
+3. Lower the **yaw turntable** on: its spigot enters the bearing's bore and its
+   underside meets the horn's disc. Four M3 screws pass down through the plate
+   into the horn's threads, heads sunk in the counterbores so nothing stands
+   proud. Line the rim's witness notch up with the turret's front face at yaw
+   zero.
+4. Bolt the **shoulder bracket** down with four M3 into the turntable's blind
+   holes. Do this before the servo goes in — afterwards the screws are behind
+   it.
+5. Drop the **shoulder servo** into the slot from above, ears against the
+   driven wall, and drive four M3 into that wall's blind holes. Reach through
+   the far wall's slot with the driver; that is what it is open for. Route its
+   lead out through the base plate's rear notch and leave a service loop long
+   enough for ±135° of yaw.
+6. Press a **608ZZ** into the upper arm's idler flange, then bolt the **idler
+   plug** to the far wall so its axle points at that bearing.
+7. Fit the second horn to the shoulder servo, then bring the **upper arm** in
+   from the front: the idler flange's bearing goes onto the plug's axle and the
+   driven flange onto the horn. Four M3 through the driven flange finish it.
+
 ---
 
 ## Assembly preview
@@ -351,19 +537,22 @@ python3 -m cad.assembly_preview --desk-thickness 35  # any desk in range
 ![Assembly preview](output/assembly_preview.png)
 
 Every part placed on a 1200 × 600 mm desk at the position `ArmGeometry`
-actually specifies, with the arm's links drawn as placeholder cylinders at
-their zero pose. Individual parts each pass their own design rules, but
-nothing else checks that they *fit together on a real desk* — this does, and
-`tests/test_cad.py` asserts the same properties numerically rather than
-relying on the picture.
+actually specifies. Since Session D.2 everything from the clamp up to the elbow
+is a **real part**; only L2 and L3 are still placeholder cylinders, waiting on
+D.3. Individual parts each pass their own design rules, but nothing else checks
+that they *fit together on a real desk* — this does, and `tests/test_cad.py`
+asserts the same properties numerically rather than relying on the picture,
+including a pairwise intersection check across the whole base stack.
 
 | | |
 |---|---|
 | Yaw axis on desk | (600.0, 30.0) mm |
 | Clamp footprint | 82.5 (X) × 80.0 (Y) mm |
-| Knob hangs below the bottom arm | 24.8 mm (on a 25 mm desk) |
-| Printed volume | 320.6 cm³ solid |
-| Estimated filament | ≈ 142 g PETG at 35% infill |
+| Shoulder pivot | z = 100.0 mm |
+| Elbow pivot | (600.0, 430.0, 100.0) mm |
+| Knob hangs below the bottom arm | 28.1 mm (on a 25 mm desk) |
+| Printed volume | 661.3 cm³ solid |
+| Estimated filament | ≈ 294 g PETG at 35% infill |
 
 The arm at zero pose reaches 980 mm along +Y, well past the desk's 600 mm
 depth. That is correct rather than alarming: the zero pose is a fully extended
@@ -394,8 +583,39 @@ shaft_offset_from_body_end_mm  shaft_boss_diameter_mm
 shaft_boss_height_mm  output_shaft_diameter_mm  travel_deg
 ```
 
-`python3 -m src.geometry` and `python3 -m cad.base_pedestal` both print this
-list every run. **Measure a real DS3218 before printing for final assembly** —
+### The servo horn -- one verified number, the rest placeholders
+
+Session D.2a added `ServoHornSpec`, the coupling both the yaw turntable and the
+upper arm bolt to. Only the spline is confirmed: the DS3218's 25T output is
+**5.9 mm** across, which is why nothing here tries to print a mating spline
+(the tooth pitch works out at 0.74 mm, under two extrusion widths).
+
+Everything describing the horn itself is a placeholder and is listed in
+`ServoHornSpec.UNVERIFIED_FIELDS`:
+
+```
+disc_diameter_mm  disc_thickness_mm  hub_diameter_mm
+hub_height_mm  bolt_circle_mm  bolt_count
+```
+
+Round 25T horns are sold at 19.7, 24.5 and 25 mm across, and hole patterns vary
+between makers. The defaults describe a 25 mm disc with four M3 holes on a
+16 mm circle, which is at least self-consistent -- that leaves 4.5 mm of rim,
+enough for M3. Two consequences are worth knowing before ordering:
+
+- **`disc_diameter_mm` sets the minimum bearing bore.** It is why the yaw
+  bearing is a 6806 and not a 608.
+- **`total_height_mm` (6 mm) has only 1 mm of margin** against the bearing's
+  7 mm width. A taller horn would lift the turntable off its race;
+  `HardwareSpec` refuses that outright and names the fix.
+
+`BearingSpec.inner_race_outer_diameter_mm` is also unverified -- bearing tables
+publish bore, OD and width but rarely the ring split. The 33 mm default is a
+deliberate under-estimate, so the turntable's land stays on the inner ring even
+if it is optimistic by a millimetre.
+
+`python3 -m src.geometry` and `python3 -m cad.base_pedestal` both print these
+lists every run. **Measure a real DS3218 before printing for final assembly** —
 `flange_span_mm` now sets the clamp's whole width, and
 `shaft_offset_from_body_end_mm` shifts the cavity within it.
 
@@ -435,12 +655,18 @@ covers the corner with 8.4 mm to spare, and the report now reads True.
 
 ## Known future work
 
-- **The clamp is over-material.** At ≈ 285 cm³ it is mostly solid; lightening
+- **The clamp is over-material.** At ≈ 356 cm³ it is mostly solid; lightening
   pockets in the spine and arms would cut print time substantially. Deferred
   until the shoulder loads from Session D.3 are known.
-- **`BaseStack` is provisional.** The 6 mm turntable plate and 24 mm shoulder
-  bracket rise are estimates. Sessions D.2 and D.3 replace them; the turret
-  height then follows automatically.
+- **`BaseStack` is settled for the base.** The 6 mm turntable plate and 24 mm
+  shoulder bracket rise are now the real parts' dimensions, and `HardwareSpec`
+  refuses to hold a budget that disagrees with them.
+- **The arm's mass estimate is stale.** `estimated_arm_mass_kg` is still Phase
+  A's 0.625 kg, but L1 alone weighs 265 g. Revise it in Session D.3, when L2
+  and L3 exist -- see `docs/PROOF_OF_CONCEPT.md` section 2.3.
+- **The pedestal grew with the bearing.** Taking the yaw bearing to a 6806 put
+  the turret at x +/-24.95 and the clamp at ~356 cm3. The lightening pockets
+  below are now worth more than they were.
 - **The stress model is a hand calculation.** A rectangular-section cantilever
   with a point load is a reasonable first approximation, but it ignores the
   spine's restraint and PETG's anisotropy between layers. If the clamp is ever
@@ -449,8 +675,10 @@ covers the corner with 8.4 mm to spare, and the report now reads True.
 ## Testing
 
 `tests/test_cad.py` covers hardware-spec validation, clamp physics, parameter
-derivation for all three parts, every design rule check, solid construction,
-and STL integrity. The mesh checks parse each exported STL directly rather than
+derivation for every part, all the design rule checks, solid construction, and
+STL integrity. Since D.2 it also sweeps the shoulder joint's whole travel
+looking for a collision between the upper arm and the bracket it straddles, and
+intersects every pair of solids in the assembly at the zero pose. The mesh checks parse each exported STL directly rather than
 trusting the kernel, because "watertight" is a property of the tessellation a
 slicer will read:
 

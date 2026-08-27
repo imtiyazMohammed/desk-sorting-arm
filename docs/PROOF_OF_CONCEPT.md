@@ -134,6 +134,116 @@ At the shoulder joint, torque is the arm and payload weight multiplied by their 
 
 The recommendation carried forward is **2:1 spur-gear reduction** because it is the cheapest and lowest-risk.
 
+### 2.3 D.2 Hardware Realization — the base stack becomes real parts
+
+Sessions D.2a–c replaced the placeholders above the pedestal with three
+printed parts. The stack that carries the shoulder pivot to exactly 100 mm is
+now built, not budgeted:
+
+| Component | Height | Part |
+|---|---|---|
+| U-clamp pedestal, desk surface → turret top | 69.5 mm | `cad/base_pedestal.py` |
+| 6806ZZ bearing standing proud of the turret | 0.5 mm | bought |
+| Yaw turntable plate | 6.0 mm | `cad/yaw_turntable.py` (D.2a) |
+| Shoulder bracket rise to the pitch axis | 24.0 mm | `cad/shoulder_bracket.py` (D.2b) |
+| **Total = shoulder pivot** | **100.000 mm** | asserted by `test_shoulder_shaft_height_matches_base_height` |
+
+Masses, from the kernel volumes at PETG's 1.27 g/cm³ (solid; a slicer at 35 %
+infill will read lower for the beam's interior but not for its walls):
+
+| Part | Volume | Mass |
+|---|---|---|
+| Yaw turntable | 22.3 cm³ | 28 g |
+| Shoulder bracket | 30.1 cm³ | 38 g |
+| Shoulder idler plug | 10.5 cm³ | 13 g |
+| L1 upper arm | 209.0 cm³ | **265 g** |
+
+#### The yaw bearing had to grow (D.2a)
+
+The 608ZZ specified in D.1 could not stay. It sits on the yaw axis directly
+above the servo's output shaft, occupying the *entire* 7 mm between the shaft
+crown at z = 63.0 and the turntable's underside at z = 70.0 — and its bore is
+8 mm. A 25T servo horn is 19.7–25 mm across, so there was nowhere in the stack
+to put the coupling between the servo and the part it drives. Nothing gripped
+the 608's inner race either, which meant it was not functioning as a bearing at
+all.
+
+The replacement is a **6806ZZ (30 × 42 × 7)**. It is the same 7 mm width, so
+the height budget above is untouched; its 30 mm bore clears a 25 mm horn with
+2.5 mm to spare, and the turntable now drops a spigot into that bore so the
+inner race is positively driven. The mean race diameter goes from 15 to 36 mm,
+which incidentally cuts the race force from a given overturning moment by about
+2.4×. The turret widens from x ±14.95 to ±24.95 to take the bigger seat and
+still sits inside the 60 mm top arm; the clamp's 82.5 mm width is unchanged.
+
+#### The upper arm straddles the shoulder (D.2c)
+
+L1 mounts as a **yoke**, not a single flange. The shoulder servo's horn face
+sits 35.5 mm off the yaw axis, so a link hung off one flange would centre
+roughly 50 mm to one side — and §3's kinematic chain has no term for a shoulder
+offset, so that distance would become systematic error in every TCP position
+the software computes. Two flanges, equally spaced, put the beam back on the
+axis: the driven side bolts to the horn, the undriven side runs a 608ZZ (kept
+in the bill of materials for exactly this) on an axle carried by the bracket's
+idler plug. The joint is supported on both sides as a consequence, which
+matters for a joint already past its torque rating.
+
+`test_the_yoke_clears_the_bracket_through_the_joints_travel` sweeps the whole
+−120°…+15° range and requires zero intersection at every step; clearance at the
+zero pose alone would say nothing about 120° up.
+
+#### Section sizing — L1 is not strength-limited
+
+At the worst-case shoulder moment of 3.26 N·m the 40 × 25 × 3 mm hollow section
+carries **1.25 MPa** against a 25 MPa allowable (PETG's 50 MPa yield with a
+safety factor of two): a margin of 20×. Estimated tip deflection is 2.7 mm. The
+section is kept as specified because it is stiff and it packages the elbow
+servo's cabling, but it is worth being clear that nothing about it is driven by
+strength.
+
+What it *is* driven by is mass, and that is the number to watch — see below.
+
+#### Torque budget: still a Phase C item, and the gap widened
+
+§2.2's shortfall stands: the shoulder needs ~33 kg·cm and a DS3218 supplies 20.
+D.2 makes it worse rather than better. §2.2 assumed roughly 300 g of PETG for
+the *whole* arm; L1 alone is 265 g and the base stack adds another 80 g. If L2
+and L3 scale with their lengths and sections, the mass distal to the shoulder
+lands near 0.83 kg rather than 0.625, taking the shoulder moment to about
+4.0 N·m — **41 kg·cm, roughly 2.1× the servo's rating** instead of 1.7×.
+
+`ArmGeometry.estimated_arm_mass_kg` is deliberately **not** updated here: L2 and
+L3 do not exist yet, so replacing one estimate with a partly-measured one would
+be no more honest and would silently move the desk clamp's grip margins. It is
+an action for Session D.3, when the last two links are real.
+
+**Retrofit provisions baked into the shoulder bracket.** Both walls carry the
+same servo slot and the same four mounting holes; today the undriven one holds
+the idler plug, and a reduction plate or an alternative actuator bolts to the
+same pattern.
+
+One honest limit on that provision: **a second DS3218 in mechanical parallel
+does not fit at the current wall spacing.** The walls are 31 mm apart because
+that is what one servo needs — its ears bear on the driven wall and its body
+reaches 30.5 mm back to the other. Two servos back to back need 61 mm between
+the ear planes, which widens the yoke from 87 to about 108 mm. That is a
+parameter change rather than a redesign, since every dimension here derives
+from `src/geometry.py`, but it is not the drop-in swap the phrase "mounting
+flexibility" suggests. Of the four options in §2.2, the **2:1 spur reduction
+remains the recommendation**, and it is the one the shared wall pattern
+actually serves.
+
+#### Two corrections to the D.2 brief worth recording
+
+- **The turntable's bearing recess.** A plain 1 mm recess over a bearing
+  standing 0.5 mm proud drops the plate onto the printed turret face and leaves
+  the bearing carrying nothing. It is built as a relief over the **outer** ring
+  only, with a land inside it bearing on the inner ring.
+- **The shoulder servo's cable cannot route down the yaw axis.** The yaw
+  servo's shaft and its horn fill that axis solid from the turret to the
+  turntable's cap. The lead leaves through a notch in the bracket's rear edge,
+  outside the turntable's rim, and needs a service loop to take ±135° of yaw
+  travel.
 ---
 
 ## 3. Coordinate Frames and Sign Conventions
@@ -421,11 +531,12 @@ Breakdown by area:
 
 | Item | Belongs to phase | Notes |
 |------|------------------|-------|
-| Shoulder torque shortfall | C (mechanical) | Add 2:1 gear reduction |
+| Shoulder torque shortfall | C (mechanical) | Add 2:1 gear reduction. Widened to ~2.1x by D.2's measured masses -- see §2.3 |
 | Camera calibration and homography | B (vision) | ArUco-based, sub-mm target |
 | Object detection (YOLO) | B (vision) | Runs on Pi 5, 10–15 FPS expected |
 | PCA9685 wiring, PWM tuning | C (electrical) | Blueprint specifies pinout |
-| 3D printing + assembly | D (mechanical) | Requires final CAD from geometry |
+| 3D printing + assembly | D (mechanical) | Base clamp, turntable, shoulder bracket and L1 done (D.1-D.2); L2, L3, wrist and gripper outstanding |
+| Arm mass estimate | D.3 | `estimated_arm_mass_kg` is still Phase A's 0.625; revise once L2 and L3 are real (§2.3) |
 | Grasp planner (orientation IK) | E (integration) | Adds target rotation matrix |
 | Preference learning + SQLite | F (planning) | Two-tier: clustering + LLM |
 | Singularity threshold calibration | E | Currently mm-scaled Jacobian is unit-inconsistent |

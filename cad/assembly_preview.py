@@ -23,9 +23,9 @@ extends the arm's links at their zero pose. Collisions, a misplaced yaw axis,
 or links passing through the desk show up immediately -- and
 ``tests/test_cad.py`` asserts the same properties numerically.
 
-The arm links are deliberately **placeholders**: plain cylinders at the link
-lengths from ``ArmGeometry``, not the real (undesigned) parts. They answer
-"does the arm clear the mount?", not "what will the arm look like?".
+Since Session D.2 everything from the desk clamp up to the elbow is a real
+part. **L2 and L3 are still placeholders**: plain cylinders at the link lengths
+from ``ArmGeometry``, standing in for parts Session D.3 has yet to design.
 
 Coordinate frame
 ----------------
@@ -61,10 +61,12 @@ from build123d import (
     Compound,
     Cylinder,
     Part,
+    Plane,
     Pos,
     Rot,
     Sphere,
     export_stl,
+    mirror,
 )
 
 from cad.base_pedestal import PedestalParameters, build_pedestal
@@ -73,7 +75,20 @@ from cad.desk_clamp_pressure_foot import (
     PressureFootParameters,
     build_pressure_foot,
 )
-from src.geometry import DEFAULT_ARM, DEFAULT_HARDWARE, ArmGeometry, HardwareSpec
+from cad.shoulder_bracket import (
+    ShoulderBracketParameters,
+    build_idler_plug,
+    build_shoulder_bracket,
+)
+from cad.upper_arm import UpperArmParameters, build_upper_arm
+from cad.yaw_turntable import TurntableParameters, build_turntable
+from src.geometry import (
+    DEFAULT_ARM,
+    DEFAULT_HARDWARE,
+    PETG_DENSITY_G_CM3,
+    ArmGeometry,
+    HardwareSpec,
+)
 
 __all__ = [
     "AssemblyPart",
@@ -89,26 +104,16 @@ _OUTPUT_DIR = Path(__file__).resolve().parent / "output"
 DEFAULT_STL_PATH = _OUTPUT_DIR / "assembly_preview.stl"
 DEFAULT_PNG_PATH = _OUTPUT_DIR / "assembly_preview.png"
 
-#: Density of PETG, g/cm^3. Used for the print-mass estimate.
-PETG_DENSITY_G_CM3 = 1.27
-
 #: Infill assumed for the mass estimate. Printed parts are not solid, so a
 #: solid-volume figure would overstate filament use by roughly three times.
 ASSUMED_INFILL_FRACTION = 0.35
 
-#: Placeholder link radii, in mm. Cosmetic only -- chosen to taper from
-#: shoulder to wrist so the links read as an arm rather than a pipe.
-LINK_RADII_MM = (14.0, 11.0, 8.0)
+#: Placeholder radii for the links that are still undesigned, in mm. L1 is a
+#: real part since Session D.2c; L2 and L3 remain cylinders until D.3.
+LINK_RADII_MM = (11.0, 8.0)
 
 #: Radius of the marker sphere at the tool centre point, in mm.
 TCP_MARKER_RADIUS_MM = 12.0
-
-#: Shoulder bracket placeholder footprint, as a fraction of the turntable's
-#: diameter. Both placeholders are sized off the turret they stand on rather
-#: than given fixed numbers: they stand in for parts Sessions D.2 and D.3 have
-#: yet to design, and inventing dimensions for them would imply decisions that
-#: have not been made.
-BRACKET_PLACEHOLDER_FRACTION = 0.75
 
 
 @dataclass(frozen=True)
@@ -157,6 +162,7 @@ class Assembly:
     yaw_axis_xy_mm: Tuple[float, float]
     servo_shaft_output_z_mm: float
     shoulder_pivot_z_mm: float
+    elbow_pivot_xyz_mm: Tuple[float, float, float]
     clamp_footprint_mm: Tuple[float, float]
     knob_drop_below_arm_mm: float
 
@@ -205,6 +211,10 @@ class Assembly:
             f"{self.clamp_footprint_mm[1]:.1f} (Y) mm on the desk surface",
             f"  Servo shaft output     : z = {self.servo_shaft_output_z_mm:.1f} mm",
             f"  Shoulder pivot         : z = {self.shoulder_pivot_z_mm:.1f} mm",
+            f"  Elbow pivot            : "
+            f"({self.elbow_pivot_xyz_mm[0]:.1f}, "
+            f"{self.elbow_pivot_xyz_mm[1]:.1f}, "
+            f"{self.elbow_pivot_xyz_mm[2]:.1f}) mm",
             f"  Knob hangs below arm   : {self.knob_drop_below_arm_mm:.1f} mm",
             "",
             "  Parts",
@@ -271,6 +281,9 @@ def build_assembly(
     pedestal_params = PedestalParameters.from_geometry(arm, hardware)
     foot_params = PressureFootParameters.from_geometry(hardware)
     knob_params = KnobParameters.from_geometry(hardware)
+    turntable_params = TurntableParameters.from_geometry(hardware)
+    bracket_params = ShoulderBracketParameters.from_geometry(arm, hardware)
+    upper_arm_params = UpperArmParameters.from_geometry(arm, hardware)
 
     base_x, base_y = arm.base_x_on_desk_mm, arm.base_y_on_desk_mm
     bottom = (Align.CENTER, Align.CENTER, Align.MIN)
@@ -317,46 +330,70 @@ def build_assembly(
     )
     knob_drop = pedestal_params.bottom_arm_bottom_z_mm - knob_bearing_z
 
-    # ---- The base stack between the turret and the shoulder pivot --------
-    # These two parts are designed in Sessions D.2 and D.3 and do not exist
-    # yet, but they occupy real height: BaseStack budgets for them, and
-    # pedestal_height_mm is what is left over. Drawing them as placeholders is
-    # what stops the arm appearing to float above the turret -- the gap is
-    # hardware, not an error in the base frame.
-    turntable_diameter = (
-        pedestal_params.turret_x_max_mm - pedestal_params.turret_x_min_mm
-    )
+    # ---- The base stack, real parts since Session D.2 ---------------------
+    # Each of these is modelled in its own frame with its origin on the joint
+    # axis it serves, and each frame's +X is the arm-forward direction. Placing
+    # them is therefore the same 90 degree rotation the clamp gets, plus the
+    # height its own datum sits at.
+    def upright(solid: Part, z_mm: float) -> Part:
+        """Place a part whose local +X is arm-forward at height ``z_mm``."""
+        return Pos(base_x, base_y, z_mm) * Rot(0, 0, 90) * solid
+
     turntable_bottom_z = pedestal_params.bearing_top_z_mm
-    turntable_solid = Pos(base_x, base_y, turntable_bottom_z) * Cylinder(
-        radius=turntable_diameter / 2.0,
-        height=hardware.base_stack.turntable_plate_thickness_mm,
-        align=bottom,
+    turntable_solid = upright(build_turntable(turntable_params), turntable_bottom_z)
+
+    bracket_bottom_z = turntable_bottom_z + turntable_params.thickness_mm
+    bracket_solid = upright(
+        build_shoulder_bracket(bracket_params), bracket_bottom_z
     )
-    bracket_side = turntable_diameter * BRACKET_PLACEHOLDER_FRACTION
-    bracket_bottom_z = (
-        turntable_bottom_z + hardware.base_stack.turntable_plate_thickness_mm
-    )
-    bracket_solid = Pos(base_x, base_y, bracket_bottom_z) * Box(
-        bracket_side,
-        bracket_side,
-        hardware.base_stack.shoulder_bracket_rise_mm,
-        align=bottom,
+    # The plug fills whichever wall the servo does not drive, so it is the
+    # driven side mirrored across the bracket's mid-plane.
+    plug_solid = upright(
+        Pos(0, -bracket_params.wall_outer_y_mm, 0)
+        * mirror(build_idler_plug(bracket_params), about=Plane.XZ),
+        bracket_bottom_z,
     )
 
-    # ---- Arm placeholders at the zero pose --------------------------------
-    # All joints at zero puts the arm horizontal along the base frame's +X,
-    # which is the desk's +Y. Links are drawn end to end from the shoulder.
     shoulder_z = arm.base_height_mm
-    link_lengths = (
-        arm.l1_upper_arm_mm,
-        arm.l2_forearm_mm,
-        arm.l3_wrist_to_tip_mm,
+    upper_arm_solid = upright(build_upper_arm(upper_arm_params), shoulder_z)
+
+    # ---- Bearings, as scenery ---------------------------------------------
+    # Not printed, but drawn: the half-millimetre the yaw bearing holds the
+    # turntable off the turret is the whole reason that underside is stepped,
+    # and a gap with nothing in it reads as an error.
+    def bearing_ring(bearing) -> Part:
+        return Cylinder(
+            radius=bearing.outer_diameter_mm / 2.0,
+            height=bearing.width_mm,
+            align=bottom,
+        ) - Cylinder(
+            radius=bearing.bore_diameter_mm / 2.0,
+            height=bearing.width_mm,
+            align=bottom,
+        )
+
+    yaw_bearing_solid = Pos(
+        base_x,
+        base_y,
+        pedestal_params.turret_top_z_mm - pedestal_params.bearing_seat_depth_mm,
+    ) * bearing_ring(hardware.thrust_bearing)
+    idler_solid = upright(
+        Pos(0, -upper_arm_params.driven_flange_inner_y_mm, 0)
+        * Rot(-90, 0, 0)
+        * bearing_ring(hardware.shoulder_idler_bearing),
+        shoulder_z,
     )
-    link_names = ("L1 upper arm", "L2 forearm", "L3 wrist-to-TCP")
-    link_colors = ("#d95f02", "#7570b3", "#1b9e77")
+
+    # ---- Arm placeholders beyond the elbow --------------------------------
+    # All joints at zero puts the arm horizontal along the base frame's +X,
+    # which is the desk's +Y. L1 is a real part; L2 and L3 stay cylinders
+    # until Session D.3 designs them.
+    link_lengths = (arm.l2_forearm_mm, arm.l3_wrist_to_tip_mm)
+    link_names = ("L2 forearm", "L3 wrist-to-TCP")
+    link_colors = ("#7570b3", "#1b9e77")
 
     links: List[AssemblyPart] = []
-    reach = 0.0
+    reach = arm.l1_upper_arm_mm
     for length, radius, name, color in zip(
         link_lengths, LINK_RADII_MM, link_names, link_colors
     ):
@@ -388,12 +425,12 @@ def build_assembly(
         AssemblyPart("pressure_foot", foot_solid, "#8c8c8c"),
         AssemblyPart("clamp_screw", screw_solid, "#4d4d4d", printed=False),
         AssemblyPart("knob", knob_solid, "#c49a6c"),
-        AssemblyPart(
-            "yaw turntable (D.2)", turntable_solid, "#a0a0a0", printed=False
-        ),
-        AssemblyPart(
-            "shoulder bracket (D.3)", bracket_solid, "#8f8f8f", printed=False
-        ),
+        AssemblyPart("yaw bearing", yaw_bearing_solid, "#5c5c5c", printed=False),
+        AssemblyPart("yaw turntable", turntable_solid, "#3f8f8f"),
+        AssemblyPart("shoulder bracket", bracket_solid, "#2f6f9f"),
+        AssemblyPart("shoulder idler plug", plug_solid, "#7fa8c9"),
+        AssemblyPart("idler bearing", idler_solid, "#5c5c5c", printed=False),
+        AssemblyPart("L1 upper arm", upper_arm_solid, "#d95f02"),
         *links,
         tcp,
     )
@@ -403,6 +440,11 @@ def build_assembly(
         yaw_axis_xy_mm=(float(base_x), float(base_y)),
         servo_shaft_output_z_mm=float(pedestal_params.servo_shaft_output_z_mm),
         shoulder_pivot_z_mm=float(arm.base_height_mm),
+        elbow_pivot_xyz_mm=(
+            float(base_x),
+            float(base_y + arm.l1_upper_arm_mm),
+            float(shoulder_z),
+        ),
         clamp_footprint_mm=(
             float(clamp_box.max.X - clamp_box.min.X),
             float(clamp_box.max.Y - clamp_box.min.Y),

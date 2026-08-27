@@ -1,5 +1,5 @@
 """
-Test suite for the parametric CAD (Sessions D.1 through D.2b).
+Test suite for the parametric CAD (Sessions D.1 through D.2).
 
 Test areas
 ----------
@@ -15,6 +15,8 @@ Test areas
 8. Yaw turntable (D.2a), including the horn/bearing compatibility rules that
    forced the 608ZZ off the yaw axis
 9. Shoulder bracket (D.2b), including the stack closing on base_height_mm
+10. Upper arm (D.2c), including the bending check and a swept clearance test
+    through the shoulder joint's whole travel
 
 The mesh checks parse the exported STL directly rather than trusting the
 kernel's own report, because "the STL is watertight" is a property of the
@@ -24,6 +26,7 @@ tessellated output a slicer will actually read, not of the B-rep it came from.
 from __future__ import annotations
 
 import collections
+import itertools
 import math
 import struct
 from dataclasses import replace
@@ -33,15 +36,16 @@ import numpy as np
 import pytest
 
 from src.geometry import (
+    BEARING_608ZZ,
     DEFAULT_ARM,
     DEFAULT_HARDWARE,
     ArmGeometry,
     BaseStack,
     BearingSpec,
     DeskClampSpec,
-    BEARING_608ZZ,
     FastenerSpec,
     HardwareSpec,
+    LinkSpec,
     PETG_ALLOWABLE_STRESS_MPA,
     PETG_DENSITY_G_CM3,
     PETG_TENSILE_YIELD_MPA,
@@ -49,6 +53,7 @@ from src.geometry import (
     ServoHornSpec,
     ServoSpec,
     ShoulderBracketSpec,
+    UPPER_ARM_LINK,
     YawTurntableSpec,
 )
 
@@ -56,7 +61,9 @@ build123d = pytest.importorskip(
     "build123d", reason="build123d is required for the CAD suite (Python >= 3.10)"
 )
 
-from cad._design import DesignStatus  # noqa: E402  - must follow the importorskip
+from build123d import Pos, Rot  # noqa: E402  - must follow the importorskip
+
+from cad._design import DesignStatus  # noqa: E402
 from cad._primitives import hex_prism, right_triangle_prism  # noqa: E402
 from cad.base_pedestal import (  # noqa: E402
     PedestalDesignError,
@@ -89,6 +96,12 @@ from cad.shoulder_bracket import (  # noqa: E402
     export_idler_plug,
     export_shoulder_bracket,
 )
+from cad.upper_arm import (  # noqa: E402
+    UpperArmDesignError,
+    UpperArmParameters,
+    build_upper_arm,
+    export_upper_arm,
+)
 from cad.yaw_turntable import (  # noqa: E402
     TurntableDesignError,
     TurntableParameters,
@@ -104,6 +117,7 @@ PART_EXPORTERS = {
     "yaw_turntable": export_turntable,
     "shoulder_bracket": export_shoulder_bracket,
     "shoulder_idler_plug": export_idler_plug,
+    "upper_arm": export_upper_arm,
 }
 PART_BUILDERS = {
     "base_pedestal": build_pedestal,
@@ -112,6 +126,7 @@ PART_BUILDERS = {
     "yaw_turntable": build_turntable,
     "shoulder_bracket": build_shoulder_bracket,
     "shoulder_idler_plug": build_idler_plug,
+    "upper_arm": build_upper_arm,
 }
 
 
@@ -272,6 +287,12 @@ def turntable() -> TurntableParameters:
 def bracket() -> ShoulderBracketParameters:
     """Default shoulder-bracket parameters (Session D.2b)."""
     return ShoulderBracketParameters.from_geometry()
+
+
+@pytest.fixture(scope="module")
+def upper_arm() -> UpperArmParameters:
+    """Default upper-arm parameters (Session D.2c)."""
+    return UpperArmParameters.from_geometry()
 
 
 # =========================================================================
@@ -2045,7 +2066,295 @@ class TestShoulderBracketSolid:
 
 
 # =========================================================================
-# 10. Shared primitives
+# 10. Session D.2c -- upper arm (L1)
+# =========================================================================
+
+
+class TestUpperArmLink:
+    def test_link_length_comes_from_arm_geometry(self):
+        assert UPPER_ARM_LINK.length_mm == DEFAULT_ARM.l1_upper_arm_mm
+
+    def test_section_properties_match_the_closed_form(self):
+        link = UPPER_ARM_LINK
+        outer_w, outer_h = link.cross_section_width_mm, link.cross_section_height_mm
+        inner_w, inner_h = link.inner_width_mm, link.inner_height_mm
+        assert link.cross_section_area_mm2 == pytest.approx(
+            outer_w * outer_h - inner_w * inner_h
+        )
+        assert link.second_moment_mm4 == pytest.approx(
+            (outer_w * outer_h**3 - inner_w * inner_h**3) / 12.0
+        )
+        assert link.section_modulus_mm3 == pytest.approx(
+            link.second_moment_mm4 / (outer_h / 2.0)
+        )
+
+    def test_upper_arm_bending_stress_below_yield(self):
+        """
+        The structural check D.2c asked for, and it passes with room to spare.
+
+        40 x 25 x 3 mm carries about 1.25 MPa at the shoulder end against a
+        25 MPa allowable -- PETG's 50 MPa yield with a safety factor of two.
+        No enlargement is needed; the section is stiffness- and packaging-
+        driven, not strength-driven.
+        """
+        moment = DEFAULT_ARM.shoulder_moment_nm()
+        stress = UPPER_ARM_LINK.bending_stress_mpa(moment)
+        assert stress < PETG_ALLOWABLE_STRESS_MPA
+        assert stress < PETG_TENSILE_YIELD_MPA / STRUCTURAL_SAFETY_FACTOR
+        assert stress == pytest.approx(1.25, abs=0.05)
+        assert PETG_ALLOWABLE_STRESS_MPA / stress > 15.0
+
+    def test_a_shallow_section_would_fail_the_same_check(self):
+        """
+        The check has teeth: bending capacity goes as the square of depth, so a
+        section shallow enough to matter is caught.
+        """
+        shallow = replace(
+            UPPER_ARM_LINK, cross_section_height_mm=8.0, wall_thickness_mm=1.0
+        )
+        assert shallow.bending_stress_mpa(
+            DEFAULT_ARM.shoulder_moment_nm() * 40.0
+        ) > PETG_ALLOWABLE_STRESS_MPA
+
+    def test_deflection_stays_within_a_few_millimetres(self):
+        assert UPPER_ARM_LINK.tip_deflection_mm(
+            DEFAULT_ARM.shoulder_moment_nm()
+        ) < 5.0
+
+    def test_beam_mass_is_the_section_times_the_length(self):
+        link = UPPER_ARM_LINK
+        assert link.estimated_mass_g() == pytest.approx(
+            link.cross_section_area_mm2 * link.length_mm / 1000.0 * PETG_DENSITY_G_CM3
+        )
+        assert link.estimated_mass_g() > 150.0
+
+    def test_negative_moment_rejected(self):
+        with pytest.raises(ValueError, match="non-negative"):
+            UPPER_ARM_LINK.bending_stress_mpa(-1.0)
+
+    def test_walls_that_meet_in_the_middle_rejected(self):
+        with pytest.raises(ValueError, match="no hollow left"):
+            replace(UPPER_ARM_LINK, wall_thickness_mm=13.0)
+
+    def test_a_channel_as_wide_as_the_beam_rejected(self):
+        with pytest.raises(ValueError, match="as wide as the beam"):
+            replace(UPPER_ARM_LINK, cable_channel_mm=(40.0, 8.0))
+
+    def test_tabs_that_would_close_the_channel_rejected(self):
+        with pytest.raises(ValueError, match="close the channel"):
+            replace(UPPER_ARM_LINK, strain_relief_tab_width_mm=100.0)
+
+
+class TestUpperArmParameters:
+    def test_default_parameters_validate(self, upper_arm):
+        assert upper_arm.validate() is DesignStatus.OK
+
+    def test_upper_arm_length_matches_geometry(self, upper_arm):
+        """Shoulder axis at x = 0, elbow axis at exactly l1_upper_arm_mm."""
+        assert upper_arm.length_mm == DEFAULT_ARM.l1_upper_arm_mm
+        assert upper_arm.elbow_axis_x_mm == pytest.approx(
+            DEFAULT_ARM.l1_upper_arm_mm
+        )
+        servo = DEFAULT_HARDWARE.elbow_pitch_servo
+        body_centre = sum(x for x, _ in upper_arm.elbow_screw_positions) / 4.0
+        assert body_centre == pytest.approx(
+            upper_arm.elbow_axis_x_mm - servo.body_offset_from_shaft_axis_mm
+        )
+
+    def test_upper_arm_end_cavity_fits_elbow_servo(self, upper_arm):
+        servo = DEFAULT_HARDWARE.elbow_pitch_servo
+        clearance = DEFAULT_HARDWARE.print_clearance_mm
+        assert upper_arm.elbow_cavity_x_max_mm - upper_arm.elbow_cavity_x_min_mm == (
+            pytest.approx(servo.body_length_mm + 2.0 * clearance)
+        )
+        assert upper_arm.elbow_cavity_z_max_mm - upper_arm.elbow_cavity_z_min_mm == (
+            pytest.approx(servo.body_width_mm + 2.0 * clearance)
+        )
+        assert 2.0 * upper_arm.elbow_wall_inner_y_mm == pytest.approx(
+            servo.body_depth_behind_ears_mm + 2.0 * clearance
+        )
+
+    def test_the_servo_does_not_fit_inside_the_beam_section(self, upper_arm):
+        """
+        Why the distal end swells into a housing rather than being a cavity in
+        the beam, as D.2c's brief described. The servo's smallest dimension is
+        20 mm and its largest is 40.5; a 40 x 25 mm section cannot swallow it
+        in any orientation once walls are counted.
+        """
+        servo = DEFAULT_HARDWARE.elbow_pitch_servo
+        assert servo.body_height_mm > upper_arm.beam_width_mm
+        assert servo.body_length_mm + 2.0 * upper_arm.wall_thickness_mm > (
+            upper_arm.beam_width_mm
+        )
+        assert upper_arm.housing_half_y_mm > upper_arm.beam_width_mm / 2.0
+        assert upper_arm.housing_z_max_mm > upper_arm.beam_height_mm / 2.0
+
+    def test_yoke_keeps_the_beam_on_the_pitch_axis(self, upper_arm):
+        """
+        The reason for a yoke instead of one flange.
+
+        A single flange would carry the beam 35.5 mm off the axis at best, and
+        forward_kinematics.py has no term for a shoulder offset. Two flanges,
+        equally spaced, put the beam back on it.
+        """
+        assert upper_arm.driven_flange_inner_y_mm == pytest.approx(
+            -upper_arm.idler_flange_inner_y_mm
+        )
+        solid = build_upper_arm(upper_arm)
+        box = solid.bounding_box()
+        # The beam and both flange faces are symmetric about y = 0; only the
+        # idler flange's extra depth for its bearing breaks it.
+        assert abs(box.min.Y + box.max.Y) <= (
+            upper_arm.idler_flange_thickness_mm
+            - upper_arm.driven_flange_thickness_mm
+            + 1e-6
+        )
+
+    def test_the_driven_flange_lands_on_the_brackets_horn(self, upper_arm, bracket):
+        assert upper_arm.driven_flange_inner_y_mm == pytest.approx(
+            bracket.horn_face_y_mm
+        )
+
+    def test_beam_starts_outside_everything_the_bracket_occupies(
+        self, upper_arm, bracket
+    ):
+        assert upper_arm.beam_start_x_mm > bracket.max_radius_from_pitch_axis_mm
+
+    def test_idler_flange_swallows_its_bearing_with_a_floor(self, upper_arm):
+        idler = DEFAULT_HARDWARE.shoulder_idler_bearing
+        assert upper_arm.idler_seat_diameter_mm == pytest.approx(idler.seat_diameter_mm)
+        assert upper_arm.idler_seat_depth_mm == pytest.approx(idler.width_mm)
+        assert upper_arm.idler_seat_floor_mm >= (
+            DEFAULT_HARDWARE.min_wall_thickness_mm / 2.0
+        )
+
+    def test_cable_trough_sits_above_a_closed_box_section(self, upper_arm):
+        """
+        The correction to D.2c's brief: an 8 mm channel cut into a 3 mm top
+        wall breaks into the hollow and turns a closed section into an open
+        one, losing most of its torsional stiffness. The trough stands on the
+        beam instead.
+        """
+        assert upper_arm.channel_depth_mm > upper_arm.wall_thickness_mm
+        assert upper_arm.channel_top_z_mm > upper_arm.beam_height_mm / 2.0
+        assert upper_arm.channel_top_z_mm == pytest.approx(
+            upper_arm.beam_height_mm / 2.0 + upper_arm.channel_depth_mm
+        )
+
+    def test_strain_relief_tabs_are_spaced_along_the_beam(self, upper_arm):
+        positions = upper_arm.strain_relief_positions
+        assert len(positions) >= 3
+        for first, second in zip(positions, positions[1:]):
+            assert second - first == pytest.approx(
+                upper_arm.strain_relief_pitch_mm
+            )
+        assert all(
+            upper_arm.beam_start_x_mm < x < upper_arm.housing_x_min_mm
+            for x in positions
+        )
+
+    def test_stress_margin_is_reported(self, upper_arm):
+        assert upper_arm.bending_stress_mpa == pytest.approx(1.25, abs=0.05)
+        assert upper_arm.stress_margin > 15.0
+
+    def test_report_names_the_key_dimensions(self, upper_arm):
+        report = upper_arm.report()
+        for token in ("Shoulder yoke", "Elbow housing", "Cable trough", "bending"):
+            assert token in report
+
+
+class TestUpperArmDesignRules:
+    def test_an_overstressed_section_is_rejected(self, upper_arm):
+        broken = replace(upper_arm, section_modulus_mm3=50.0)
+        with pytest.raises(UpperArmDesignError) as excinfo:
+            broken.validate()
+        assert excinfo.value.status is DesignStatus.INVALID_PARAMETER
+        assert "allowable" in str(excinfo.value)
+
+    def test_a_beam_that_would_strike_the_bracket_is_rejected(self, upper_arm):
+        broken = replace(upper_arm, beam_start_x_mm=10.0)
+        with pytest.raises(UpperArmDesignError) as excinfo:
+            broken.validate()
+        assert excinfo.value.status is DesignStatus.FEATURE_COLLISION
+
+    def test_flanges_inside_the_beam_width_are_rejected(self, upper_arm):
+        broken = replace(upper_arm, driven_flange_inner_y_mm=10.0)
+        with pytest.raises(UpperArmDesignError) as excinfo:
+            broken.validate()
+        assert excinfo.value.status is DesignStatus.FEATURE_COLLISION
+
+    def test_a_flange_too_small_for_its_bearing_is_rejected(self, upper_arm):
+        broken = replace(upper_arm, flange_diameter_mm=26.0)
+        with pytest.raises(UpperArmDesignError) as excinfo:
+            broken.validate()
+        assert excinfo.value.status is DesignStatus.WALL_TOO_THIN
+
+    def test_a_counterbore_off_the_flange_is_rejected(self, upper_arm):
+        broken = replace(upper_arm, horn_counterbore_diameter_mm=30.0)
+        with pytest.raises(UpperArmDesignError) as excinfo:
+            broken.validate()
+        assert excinfo.value.status is DesignStatus.FEATURE_COLLISION
+
+    def test_a_housing_overlapping_the_yoke_is_rejected(self, upper_arm):
+        broken = replace(upper_arm, housing_x_min_mm=upper_arm.beam_start_x_mm - 1.0)
+        with pytest.raises(UpperArmDesignError) as excinfo:
+            broken.validate()
+        assert excinfo.value.status is DesignStatus.FEATURE_COLLISION
+
+    def test_a_trough_wider_than_the_beam_is_rejected(self, upper_arm):
+        broken = replace(upper_arm, channel_width_mm=40.0)
+        with pytest.raises(UpperArmDesignError) as excinfo:
+            broken.validate()
+        assert excinfo.value.status is DesignStatus.FEATURE_COLLISION
+
+    def test_build_rejects_invalid_parameters(self, upper_arm):
+        with pytest.raises(UpperArmDesignError):
+            build_upper_arm(replace(upper_arm, beam_start_x_mm=5.0))
+
+
+class TestUpperArmSolid:
+    def test_upper_arm_is_one_solid(self, upper_arm):
+        assert len(build_upper_arm(upper_arm).solids()) == 1
+
+    def test_bounding_box_spans_yoke_to_elbow_housing(self, upper_arm):
+        box = build_upper_arm(upper_arm).bounding_box()
+        assert box.min.X == pytest.approx(-upper_arm.flange_diameter_mm / 2.0, abs=0.2)
+        assert box.max.X == pytest.approx(upper_arm.housing_x_max_mm, abs=0.2)
+        assert box.max.Y == pytest.approx(
+            upper_arm.driven_flange_inner_y_mm
+            + upper_arm.driven_flange_thickness_mm
+        )
+
+    def test_the_beam_is_actually_hollow(self, upper_arm):
+        solid = build_upper_arm(upper_arm)
+        filled = replace(upper_arm, wall_thickness_mm=12.0)
+        assert solid.volume < build_upper_arm(filled).volume
+
+    def test_the_yoke_clears_the_bracket_through_the_joints_travel(
+        self, upper_arm, bracket
+    ):
+        """
+        Swept, not merely checked at the zero pose.
+
+        The yoke rotates about the pitch axis, so a clearance that holds at
+        zero says nothing about 120 degrees up. This walks the joint's whole
+        mechanical range and insists on zero intersection at every step.
+        """
+        arm_solid = build_upper_arm(upper_arm)
+        static = Pos(0, 0, -bracket.pitch_axis_z_mm) * build_shoulder_bracket(
+            bracket
+        )
+        limit = DEFAULT_ARM.joint_limits[1]
+        for degrees in np.linspace(limit.min_deg, limit.max_deg, 10):
+            swung = Rot(0, float(degrees), 0) * arm_solid
+            assert (swung & static).volume == pytest.approx(0.0, abs=1e-6), (
+                f"upper arm strikes the shoulder bracket at "
+                f"theta_2 = {degrees:.1f} deg"
+            )
+
+
+# =========================================================================
+# 11. Shared primitives
 # =========================================================================
 
 
@@ -2371,7 +2680,7 @@ class TestAssemblyPreview:
         assert box.min.Y < 0.0
         assert box.max.Y > 0.0
 
-    def test_pedestal_does_not_intersect_placeholder_arm_links(self, assembly):
+    def test_pedestal_does_not_intersect_the_arm(self, assembly):
         """
         At the zero pose the links run horizontally at the shoulder height, and
         the turret must stay clear beneath them. A collision here would mean
@@ -2386,47 +2695,103 @@ class TestAssemblyPreview:
                 f"{name} overlaps the pedestal by {volume:.3f} mm3"
             )
 
-    def test_base_stack_placeholders_fill_the_gap_to_the_shoulder(self, assembly):
+    def test_assembly_uses_real_upper_stack(self, assembly):
         """
-        The D.1c preview showed L1 apparently floating above the turret. It was
-        not a base-frame error: the 30.5 mm between the turret's top face and
-        the shoulder pivot is the bearing, the yaw turntable and the shoulder
-        bracket, none of which existed to be drawn. With placeholders in the
-        scene the stack is continuous, and this test keeps it that way.
-        """
-        params = PedestalParameters.from_geometry()
-        turntable = assembly.by_name("yaw turntable (D.2)").solid.bounding_box()
-        bracket = assembly.by_name("shoulder bracket (D.3)").solid.bounding_box()
+        The turntable, bracket and upper arm are placed parts now, not
+        cylinders standing in for them.
 
-        # Turntable rides the bearing's upper face, not the turret's.
-        assert turntable.min.Z == pytest.approx(params.bearing_top_z_mm, abs=1e-6)
-        # Bracket stands on the turntable, with no gap between them.
-        assert bracket.min.Z == pytest.approx(turntable.max.Z, abs=1e-6)
-        # And its top lands exactly on the shoulder pivot.
-        assert bracket.max.Z == pytest.approx(DEFAULT_ARM.base_height_mm, abs=1e-6)
-
-    def test_nothing_floats_between_the_turret_and_the_shoulder(self, assembly):
-        """Every interface in the base stack touches the next, to the micron."""
-        params = PedestalParameters.from_geometry()
-        boundaries = [
-            params.turret_top_z_mm,
-            params.bearing_top_z_mm,
-            assembly.by_name("yaw turntable (D.2)").solid.bounding_box().max.Z,
-            assembly.by_name("shoulder bracket (D.3)").solid.bounding_box().max.Z,
-        ]
-        assert boundaries == sorted(boundaries)
-        assert boundaries[-1] == pytest.approx(assembly.shoulder_pivot_z_mm, abs=1e-6)
-
-    def test_stack_placeholders_sit_on_the_turret_not_over_it(self, assembly):
+        Checked by volume rather than by name: a placeholder disc and a real
+        turntable can share a label, but they cannot share a volume, because
+        the real part is hollowed by its horn pocket, race relief and holes.
         """
-        Sized from the turret they stand on. They stand in for parts D.2 and
-        D.3 have yet to design, so inventing dimensions would imply decisions
-        nobody has made.
+        for name, builder, params in (
+            ("yaw turntable", build_turntable, TurntableParameters.from_geometry()),
+            (
+                "shoulder bracket",
+                build_shoulder_bracket,
+                ShoulderBracketParameters.from_geometry(),
+            ),
+            ("L1 upper arm", build_upper_arm, UpperArmParameters.from_geometry()),
+        ):
+            placed = assembly.by_name(name)
+            assert placed.printed, f"{name} should count toward the print estimate"
+            assert placed.solid.volume == pytest.approx(
+                builder(params).volume, rel=1e-9
+            )
+
+    def test_no_collisions_in_upper_stack_at_zero_pose(self, assembly):
         """
-        params = PedestalParameters.from_geometry()
-        turret_span = params.turret_x_max_mm - params.turret_x_min_mm
-        turntable = assembly.by_name("yaw turntable (D.2)").solid.bounding_box()
-        assert turntable.max.X - turntable.min.X <= turret_span + 1e-6
+        Every pair of solids in the base stack, intersected.
+
+        A positioning error anywhere in pedestal -> bearing -> turntable ->
+        bracket -> upper arm shows up here as a non-zero intersection volume.
+        """
+        names = (
+            "base_pedestal",
+            "yaw turntable",
+            "shoulder bracket",
+            "shoulder idler plug",
+            "L1 upper arm",
+        )
+        solids = {name: assembly.by_name(name).solid for name in names}
+        for first, second in itertools.combinations(names, 2):
+            overlap = (solids[first] & solids[second]).volume
+            assert overlap == pytest.approx(0.0, abs=1e-6), (
+                f"{first} intersects {second} by {overlap:.3f} mm3 at the "
+                "zero pose"
+            )
+
+    def test_upper_stack_is_continuous_from_turret_to_elbow(self, assembly):
+        """
+        Nothing floats. Each part's underside meets the one below it, with the
+        bearing's proud height the only deliberate gap.
+        """
+        pedestal = PedestalParameters.from_geometry()
+        turntable = assembly.by_name("yaw turntable").solid.bounding_box()
+        bracket = assembly.by_name("shoulder bracket").solid.bounding_box()
+
+        # The spigot reaches down to the bearing seat's floor ...
+        assert turntable.min.Z == pytest.approx(pedestal.servo_shaft_output_z_mm)
+        # ... and the plate's top face is where the bracket stands.
+        assert bracket.min.Z == pytest.approx(
+            pedestal.bearing_top_z_mm
+            + DEFAULT_HARDWARE.yaw_turntable.thickness_mm
+        )
+        assert bracket.min.Z - pedestal.turret_top_z_mm == pytest.approx(
+            DEFAULT_HARDWARE.thrust_bearing.proud_mm
+            + DEFAULT_HARDWARE.yaw_turntable.thickness_mm
+        )
+
+    def test_upper_arm_is_centred_on_the_yaw_axis(self, assembly):
+        """
+        What the yoke bought. A single-flange mount would have put this whole
+        box roughly 50 mm to one side of the yaw axis.
+        """
+        box = assembly.by_name("L1 upper arm").solid.bounding_box()
+        centre_x = (box.min.X + box.max.X) / 2.0
+        assert centre_x == pytest.approx(DEFAULT_ARM.base_x_on_desk_mm, abs=2.5)
+
+    def test_upper_arm_pivots_on_the_shoulder_axis(self, assembly):
+        box = assembly.by_name("L1 upper arm").solid.bounding_box()
+        # In the desk frame the link runs along +Y from the shoulder.
+        assert box.max.Y == pytest.approx(
+            DEFAULT_ARM.base_y_on_desk_mm
+            + UpperArmParameters.from_geometry().housing_x_max_mm
+        )
+        assert assembly.elbow_pivot_xyz_mm == pytest.approx(
+            (
+                DEFAULT_ARM.base_x_on_desk_mm,
+                DEFAULT_ARM.base_y_on_desk_mm + DEFAULT_ARM.l1_upper_arm_mm,
+                DEFAULT_ARM.base_height_mm,
+            )
+        )
+
+    def test_placeholders_are_only_the_links_d3_has_yet_to_design(self, assembly):
+        scenery = {part.name for part in assembly.parts if not part.printed}
+        assert {"L2 forearm", "L3 wrist-to-TCP"} <= scenery
+        assert "L1 upper arm" not in scenery
+        assert "yaw turntable" not in scenery
+        assert "shoulder bracket" not in scenery
 
     def test_assembly_reports_the_shaft_output_height(self, assembly):
         params = PedestalParameters.from_geometry()
@@ -2450,11 +2815,23 @@ class TestAssemblyPreview:
             assert assembly.by_name(name).solid.bounding_box().min.Z > 0.0
 
     def test_links_start_at_the_shoulder_and_run_inward(self, assembly):
-        """Zero pose is horizontal along the base frame's +X, i.e. desk +Y."""
+        """
+        Zero pose is horizontal along the base frame's +X, i.e. desk +Y.
+
+        L1's bounding box now reaches *behind* the shoulder axis, because its
+        yoke wraps back around the bracket to reach the servo horn. What has to
+        land on the axis is the joint, so that is what is checked -- the elbow
+        end, one link length along.
+        """
         base_y = DEFAULT_ARM.base_y_on_desk_mm
+        params = UpperArmParameters.from_geometry()
         link1 = assembly.by_name("L1 upper arm").solid.bounding_box()
-        assert link1.min.Y == pytest.approx(base_y, abs=1e-6)
-        assert link1.max.Y == pytest.approx(
+        assert link1.min.Y == pytest.approx(
+            base_y - params.flange_diameter_mm / 2.0, abs=0.2
+        )
+        assert base_y + DEFAULT_ARM.l1_upper_arm_mm < link1.max.Y
+        link2 = assembly.by_name("L2 forearm").solid.bounding_box()
+        assert link2.min.Y == pytest.approx(
             base_y + DEFAULT_ARM.l1_upper_arm_mm, abs=1e-6
         )
 
@@ -2492,11 +2869,20 @@ class TestAssemblyPreview:
         assert box.max.Z == pytest.approx(0.0, abs=1e-6)
 
     def test_scenery_is_excluded_from_the_print_estimate(self, assembly):
-        """The desk and the arm placeholders are not parts we make."""
+        """
+        The desk, the fasteners, the bearings and the two undesigned links are
+        not parts we make. Everything else in the scene is, since Session D.2.
+        """
         printed = {part.name for part in assembly.printed_parts}
-        # The D.2/D.3 placeholders are excluded too: they will be printed, but
-        # their real volume is unknown, so counting them would invent a figure.
-        assert printed == {"base_pedestal", "pressure_foot", "knob"}
+        assert printed == {
+            "base_pedestal",
+            "pressure_foot",
+            "knob",
+            "yaw turntable",
+            "shoulder bracket",
+            "shoulder idler plug",
+            "L1 upper arm",
+        }
         assert assembly.estimated_print_mass_g > 0.0
 
     @pytest.mark.parametrize("thickness", [15.0, 25.0, 35.0])
